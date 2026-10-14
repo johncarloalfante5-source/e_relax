@@ -19,8 +19,9 @@ and answers about their own bookings from the E-Relax client dashboard.
 - A signed-in client can ask about their own bookings. Responses may summarize
   service, appointment date/time, therapist, booking status, and payment
   summary where the signed-in user has access to that information.
-- Chat messages are kept in the current view only; no separate chat-history
-  table or long-term transcript storage is introduced.
+- Chat messages and recent conversation context are kept in the current view
+  only; no separate chat-history table or long-term transcript storage is
+  introduced.
 - The assistant does not create, edit, cancel, or reschedule bookings.
 - The assistant does not provide medical diagnoses or treatment advice. If it
   lacks a reliable answer, it says so and directs the client to contact the
@@ -56,8 +57,10 @@ and answers about their own bookings from the E-Relax client dashboard.
    context to Gemini using `GEMINI_API_KEY` from function secrets. The prompt
    treats user text as untrusted and instructs the model to answer only from
    supplied clinic facts and booking context.
-5. The function returns a bounded plain-text response. Flutter displays the
-   response and handles retryable errors without losing the current draft.
+5. Flutter sends the current question with bounded recent turns from the
+   current in-memory conversation. The function returns a bounded plain-text
+   response, which Flutter displays while preserving the draft on retryable
+   errors.
 
 The model is not allowed to execute database queries or actions. Booking data
 is fetched and authorization-filtered by the Edge Function before the Gemini
@@ -73,7 +76,8 @@ request; the model only phrases that data into an answer.
   my next booking?”.
 - Keep displayed booking/payment details concise and clearly tie them to the
   current client's own records.
-- Do not store transcript history after the chat view is closed.
+- Keep only bounded recent turns in view state so follow-up questions make
+  sense; do not store transcript history after the chat view is closed.
 
 ## Security and privacy
 
