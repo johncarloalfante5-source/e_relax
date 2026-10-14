@@ -6,12 +6,16 @@ import '../presentation/client_dashboard_screen/client_dashboard_screen.dart';
 import '../presentation/client_dashboard_screen/client_bookings_screen.dart';
 import '../presentation/client_dashboard_screen/client_profile_screen.dart';
 import '../presentation/client_dashboard_screen/client_notifications_screen.dart';
+import '../presentation/client_dashboard_screen/client_chat_screen.dart';
+import '../presentation/client_admin_chat/client_admin_chat_thread_screen.dart';
 import '../presentation/admin_dashboard_screen/therapist_management_screen.dart';
 import '../presentation/therapist_dashboard_screen/therapist_dashboard_screen.dart';
 import '../presentation/admin_dashboard_screen/admin_dashboard_screen.dart';
 import '../presentation/admin_dashboard_screen/online_booking_in_progress_screen.dart';
 import '../presentation/Appointment_booking/appointment_booking_screen.dart';
 import '../widget/app_scaffold.dart';
+import '../data/stores/auth_session_store.dart';
+import '../models/profile.dart';
 
 class AppRoutes {
   static const String initial = '/';
@@ -20,6 +24,8 @@ class AppRoutes {
   static const String clientBookings = '/client-bookings-screen';
   static const String clientProfile = '/client-profile-screen';
   static const String clientNotifications = '/client-notifications-screen';
+  static const String clientChat = '/client-chat-screen';
+  static const String clientAdminChatThreadBase = '/client-admin-chat';
   static const String therapistManagement =
       '/admin-dashboard-screen/therapists';
   static const String therapistDashboard = '/therapist-dashboard-screen';
@@ -31,6 +37,29 @@ class AppRoutes {
 
 final GoRouter appRouter = GoRouter(
   initialLocation: AppRoutes.initial,
+  refreshListenable: AuthSessionStore.instance,
+  redirect: (context, state) {
+    final session = AuthSessionStore.instance;
+    final path = state.uri.path;
+    final isLogin = path == AppRoutes.initial || path == AppRoutes.signUpLogin;
+    final profile = session.profile;
+    if (profile == null) return isLogin ? null : AppRoutes.signUpLogin;
+    if (isLogin) return _homeFor(profile.role);
+    final allowed = switch (profile.role) {
+      AppRole.client => path.startsWith(AppRoutes.clientDashboard) ||
+          path.startsWith(AppRoutes.clientBookings) ||
+          path.startsWith(AppRoutes.clientProfile) ||
+          path == AppRoutes.clientNotifications ||
+          path == AppRoutes.clientChat ||
+          path.startsWith('${AppRoutes.clientAdminChatThreadBase}/') ||
+          path == AppRoutes.appointmentBooking,
+      AppRole.admin => path.startsWith('/admin-dashboard-screen') ||
+          path.startsWith('${AppRoutes.clientAdminChatThreadBase}/'),
+      AppRole.cashier => path == AppRoutes.adminDashboard || path == AppRoutes.adminOnlineInProgress,
+      AppRole.therapist => path == AppRoutes.therapistDashboard,
+    };
+    return allowed ? null : _homeFor(profile.role);
+  },
   routes: [
     GoRoute(
       path: AppRoutes.initial,
@@ -97,6 +126,17 @@ final GoRouter appRouter = GoRouter(
       builder: (context, state) => const ClientNotificationsScreen(),
     ),
     GoRoute(
+      path: AppRoutes.clientChat,
+      builder: (context, state) => const ClientChatScreen(),
+    ),
+    GoRoute(
+      path: '${AppRoutes.clientAdminChatThreadBase}/:conversationId',
+      builder: (context, state) => ClientAdminChatThreadScreen(
+        conversationId: state.pathParameters['conversationId']!,
+        clientName: state.extra as String?,
+      ),
+    ),
+    GoRoute(
       path: AppRoutes.therapistManagement,
       builder: (context, state) => const TherapistManagementScreen(),
     ),
@@ -149,3 +189,10 @@ final GoRouter appRouter = GoRouter(
     ),
   ],
 );
+
+String _homeFor(AppRole role) => switch (role) {
+  AppRole.client => AppRoutes.clientDashboard,
+  AppRole.admin => AppRoutes.adminDashboard,
+  AppRole.cashier => AppRoutes.adminDashboard,
+  AppRole.therapist => AppRoutes.therapistDashboard,
+};

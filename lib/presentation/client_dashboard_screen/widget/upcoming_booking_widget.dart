@@ -367,7 +367,7 @@ class _BookingCard extends StatelessWidget {
     );
     controller.dispose();
     if (submission == null || !context.mounted) return;
-    final saved = PaymentBookingStore.instance.resubmitProof(
+    final saved = await PaymentBookingStore.instance.resubmitProof(
       booking.id,
       clientId: localClientSessionId,
       reference: submission.reference,

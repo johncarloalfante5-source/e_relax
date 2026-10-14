@@ -2,7 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../data/payment_booking_store.dart';
-import '../../models/booking.dart';
+import '../../data/stores/auth_session_store.dart';
+import '../../data/therapist_roster_store.dart';
 import '../../routes/app_routes.dart';
 import '../../theme/app_theme.dart';
 
@@ -27,110 +28,60 @@ class ClientProfileScreen extends StatelessWidget {
     ),
     body: AnimatedBuilder(
       animation: ClientSession.instance,
-      builder: (context, _) => AnimatedBuilder(
-        animation: PaymentBookingStore.instance,
-        builder: (context, _) {
-          final session = ClientSession.instance;
-          final bookings = PaymentBookingStore.instance.bookingsForClient(
-            session.clientId,
-          );
-          final upcoming = bookings.where((booking) {
-            return booking.bookingStatus != BookingStatus.completed &&
-                booking.bookingStatus != BookingStatus.cancelled &&
-                !DateUtils.dateOnly(
-                  booking.appointmentDate,
-                ).isBefore(DateUtils.dateOnly(DateTime.now()));
-          }).length;
-          final completed = bookings
-              .where(
-                (booking) => booking.bookingStatus == BookingStatus.completed,
-              )
-              .length;
-
-          return ListView(
-            padding: const EdgeInsets.fromLTRB(16, 20, 16, 110),
-            children: [
-              _ProfileHeader(name: session.clientName),
-              const SizedBox(height: 20),
-              _SectionCard(
-                title: 'Personal information',
-                children: [
-                  _InfoRow(
-                    icon: Icons.person_outline_rounded,
-                    label: 'Full name',
-                    value: session.clientName,
-                    trailing: TextButton(
-                      onPressed: () => _editName(context, session.clientName),
-                      child: const Text('Edit'),
-                    ),
+      builder: (context, _) {
+        final session = ClientSession.instance;
+        return ListView(
+          padding: const EdgeInsets.fromLTRB(16, 20, 16, 110),
+          children: [
+            _ProfileHeader(name: session.clientName),
+            const SizedBox(height: 20),
+            _SectionCard(
+              title: 'Personal information',
+              children: [
+                _InfoRow(
+                  icon: Icons.person_outline_rounded,
+                  label: 'Full name',
+                  value: AuthSessionStore.instance.profile?.displayName ?? session.clientName,
+                  trailing: TextButton(
+                    onPressed: () => _editName(context, session.clientName),
+                    child: const Text('Edit'),
                   ),
-                  const Divider(height: 1),
-                  _InfoRow(
-                    icon: Icons.email_outlined,
-                    label: 'Email address',
-                    value: session.email ?? 'Not available',
+                ),
+                const Divider(height: 1),
+                _InfoRow(
+                  icon: Icons.email_outlined,
+                  label: 'Email address',
+                  value: AuthSessionStore.instance.profile?.email ?? session.email ?? 'Not available',
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            _SectionCard(
+              title: 'Account',
+              children: [
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.lock_outline_rounded),
+                  title: const Text('Change password'),
+                  subtitle: const Text('Update your account password'),
+                  onTap: () => _changePassword(context),
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(
+                    Icons.logout_rounded,
+                    color: AppTheme.error,
                   ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              _SectionCard(
-                title: 'Your activity',
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: _ActivityStat(
-                          label: 'Total bookings',
-                          value: bookings.length,
-                          icon: Icons.spa_outlined,
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: _ActivityStat(
-                          label: 'Upcoming',
-                          value: upcoming,
-                          icon: Icons.event_available_outlined,
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: _ActivityStat(
-                          label: 'Completed',
-                          value: completed,
-                          icon: Icons.check_circle_outline_rounded,
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 14),
-                  OutlinedButton.icon(
-                    onPressed: () => context.go(AppRoutes.clientBookings),
-                    icon: const Icon(Icons.calendar_month_outlined),
-                    label: const Text('View bookings and receipts'),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              _SectionCard(
-                title: 'Account',
-                children: [
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    leading: const Icon(
-                      Icons.logout_rounded,
-                      color: AppTheme.error,
-                    ),
-                    title: const Text('Log out'),
-                    subtitle: const Text('Sign out of this client account'),
-                    onTap: () => _confirmLogout(context),
-                  ),
-                ],
-              ),
-            ],
-          );
-        },
-      ),
+                  title: const Text('Log out'),
+                  subtitle: const Text('Sign out of this client account'),
+                  onTap: () => _confirmLogout(context),
+                ),
+              ],
+            ),
+          ],
+        );
+      },
     ),
   );
 
@@ -173,7 +124,18 @@ class ClientProfileScreen extends StatelessWidget {
       ),
     );
     controller.dispose();
-    if (name != null) ClientSession.instance.updateDisplayName(name);
+    if (name != null) {
+      try {
+        await AuthSessionStore.instance.updateDisplayName(name);
+        ClientSession.instance.updateDisplayName(name);
+      } catch (error) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Could not save profile: $error')),
+          );
+        }
+      }
+    }
   }
 
   Future<void> _confirmLogout(BuildContext context) async {
@@ -196,12 +158,154 @@ class ClientProfileScreen extends StatelessWidget {
       ),
     );
     if (shouldLogout == true && context.mounted) {
-      ClientSession.instance.signOut();
-      context.go(AppRoutes.signUpLogin);
+      try {
+        await AuthSessionStore.instance.signOut();
+        ClientSession.instance.signOut();
+        await PaymentBookingStore.instance.clearSession();
+        await TherapistRosterStore.instance.initialize();
+        if (context.mounted) context.go(AppRoutes.signUpLogin);
+      } catch (error) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Could not log out: $error')),
+          );
+        }
+      }
+    }
+  }
+
+  Future<void> _changePassword(BuildContext context) async {
+    final currentPasswordController = TextEditingController();
+    final newPasswordController = TextEditingController();
+    final confirmPasswordController = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+    var submitting = false;
+    String? errorMessage;
+
+    final changed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) => AlertDialog(
+          title: const Text('Change password'),
+          content: Form(
+            key: formKey,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextFormField(
+                    controller: currentPasswordController,
+                    obscureText: true,
+                    autofocus: true,
+                    decoration: const InputDecoration(
+                      labelText: 'Current password',
+                      border: OutlineInputBorder(),
+                    ),
+                    validator: (value) => value == null || value.isEmpty
+                        ? 'Enter your current password'
+                        : null,
+                  ),
+                  const SizedBox(height: 12),
+                  TextFormField(
+                    controller: newPasswordController,
+                    obscureText: true,
+                    decoration: const InputDecoration(
+                      labelText: 'New password',
+                      border: OutlineInputBorder(),
+                    ),
+                    validator: (value) {
+                      if (value == null || value.length < 6) {
+                        return 'Use at least 6 characters';
+                      }
+                      if (value == currentPasswordController.text) {
+                        return 'Choose a different password';
+                      }
+                      return null;
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                  TextFormField(
+                    controller: confirmPasswordController,
+                    obscureText: true,
+                    decoration: const InputDecoration(
+                      labelText: 'Confirm new password',
+                      border: OutlineInputBorder(),
+                    ),
+                    validator: (value) => value != newPasswordController.text
+                        ? 'Passwords do not match'
+                        : null,
+                  ),
+                  if (errorMessage != null) ...[
+                    const SizedBox(height: 12),
+                    Text(
+                      errorMessage!,
+                      style: TextStyle(color: Theme.of(context).colorScheme.error),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: submitting
+                  ? null
+                  : () => Navigator.pop(dialogContext, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: submitting
+                  ? null
+                  : () async {
+                      if (!(formKey.currentState?.validate() ?? false)) return;
+                      setDialogState(() {
+                        submitting = true;
+                        errorMessage = null;
+                      });
+                      try {
+                        await AuthSessionStore.instance.changePassword(
+                          currentPassword: currentPasswordController.text,
+                          newPassword: newPasswordController.text,
+                        );
+                        if (dialogContext.mounted) {
+                          Navigator.pop(dialogContext, true);
+                        }
+                      } catch (error) {
+                        if (dialogContext.mounted) {
+                          setDialogState(() {
+                            submitting = false;
+                            errorMessage = error.toString().replaceFirst(
+                              RegExp(r'^Exception:\s*'),
+                              '',
+                            );
+                          });
+                        }
+                      }
+                    },
+              child: submitting
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Text('Update password'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    currentPasswordController.dispose();
+    newPasswordController.dispose();
+    confirmPasswordController.dispose();
+
+    if (changed == true && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Password updated successfully.')),
+      );
     }
   }
 }
-
 class _ProfileHeader extends StatelessWidget {
   const _ProfileHeader({required this.name});
 
@@ -333,43 +437,6 @@ class _InfoRow extends StatelessWidget {
           ),
         ),
         if (trailing != null) trailing!,
-      ],
-    ),
-  );
-}
-
-class _ActivityStat extends StatelessWidget {
-  const _ActivityStat({
-    required this.label,
-    required this.value,
-    required this.icon,
-  });
-
-  final String label;
-  final int value;
-  final IconData icon;
-
-  @override
-  Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
-    decoration: BoxDecoration(
-      color: AppTheme.primaryContainer,
-      borderRadius: BorderRadius.circular(12),
-    ),
-    child: Column(
-      children: [
-        Icon(icon, color: AppTheme.primary, size: 20),
-        const SizedBox(height: 7),
-        Text(
-          value.toString(),
-          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
-        ),
-        const SizedBox(height: 3),
-        Text(
-          label,
-          textAlign: TextAlign.center,
-          style: const TextStyle(fontSize: 11),
-        ),
       ],
     ),
   );

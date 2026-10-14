@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../data/payment_booking_store.dart';
+import '../../data/stores/auth_session_store.dart';
+import '../../data/therapist_roster_store.dart';
 import '../../data/therapist_roster_store.dart';
 import '../../models/booking.dart';
 import '../../routes/app_routes.dart';
@@ -31,7 +33,12 @@ class _TherapistDashboardScreenState extends State<TherapistDashboardScreen> {
       actions: [
         IconButton(
           tooltip: 'Log out',
-          onPressed: () => context.go(AppRoutes.initial),
+          onPressed: () async {
+            await AuthSessionStore.instance.signOut();
+            await PaymentBookingStore.instance.clearSession();
+            await TherapistRosterStore.instance.initialize();
+            if (context.mounted) context.go(AppRoutes.initial);
+          },
           icon: const Icon(Icons.logout_rounded),
         ),
       ],
@@ -39,9 +46,11 @@ class _TherapistDashboardScreenState extends State<TherapistDashboardScreen> {
     body: AnimatedBuilder(
       animation: TherapistRosterStore.instance,
       builder: (context, _) {
-        final therapist = TherapistRosterStore.instance.findByEmail(
-          widget.email,
-        );
+        final therapist = AuthSessionStore.instance.profile == null
+            ? null
+            : TherapistRosterStore.instance.findByAuthProfileId(
+                AuthSessionStore.instance.profile!.id,
+              );
         if (therapist == null) {
           return const Center(
             child: Padding(

@@ -1,12 +1,19 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:sizer/sizer.dart';
+import 'data/backend/supabase_client_provider.dart';
+import 'data/stores/auth_session_store.dart';
+import 'data/therapist_roster_store.dart';
+import 'data/repositories/supabase_clinic_repository.dart';
+import 'data/service_catalog.dart';
+import 'data/payment_booking_store.dart';
 
-import '../core/app_export.dart';
-import '../widget/custom_error_widget.dart';
+import 'core/app_export.dart';
+import 'widget/custom_error_widget.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  String? startupError;
 
   bool hasShownError = false;
 
@@ -26,19 +33,71 @@ void main() async {
   };
 
   // 🚨 CRITICAL: Device orientation lock - DO NOT REMOVE
-  Future.wait([
-    SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]),
-  ]).then((value) {
-    GoRouter.optionURLReflectsImperativeAPIs = true;
-    runApp(MyApp());
-  });
+  try {
+    await SupabaseClientProvider.initialize();
+    await AuthSessionStore.instance.initialize();
+    final restoredProfile = AuthSessionStore.instance.profile;
+    if (restoredProfile != null) {
+      ClientSession.instance.signIn(
+        email: restoredProfile.email,
+        displayName: restoredProfile.displayName,
+        clientId: restoredProfile.id,
+      );
+    }
+    await TherapistRosterStore.instance.initialize();
+    await TherapistRosterStore.instance.watchDutyForDate(DateTime.now());
+    final clinicRepository = SupabaseClinicRepository();
+    final remoteServices = await clinicRepository.watchServices().first;
+    ServiceCatalog.replaceFromBackend(remoteServices.map((service) => {
+      'id': service.id,
+      'name': service.name,
+      'description': service.description,
+      'price': service.price,
+      'durationMinutes': service.durationMinutes,
+      'rating': service.rating ?? 0,
+      'imageUrl': service.imageUrl ?? '',
+      'semanticLabel': service.semanticLabel ?? service.name,
+      'category': service.category,
+    }).toList());
+    ServiceCatalog.connect(clinicRepository.watchServices());
+    if (restoredProfile != null) await PaymentBookingStore.instance.initialize();
+  } catch (error) {
+    startupError = error.toString();
+  }
+
+  await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+  GoRouter.optionURLReflectsImperativeAPIs = true;
+  runApp(MyApp(startupError: startupError));
 }
 
 class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+  const MyApp({super.key, this.startupError});
+  final String? startupError;
 
   @override
   Widget build(BuildContext context) {
+    if (startupError != null) {
+      return MaterialApp(
+        title: 'E-Relax setup',
+        home: Scaffold(
+          body: SafeArea(
+            child: Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 680),
+                  child: SelectableText(
+                    'E-Relax could not connect to Supabase.\n\n$startupError\n\n'
+                    'Check SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY, then apply the migrations in supabase/ before launching again.',
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
     return Sizer(
       builder: (context, orientation, screenType) {
         return MaterialApp.router(
@@ -82,14 +141,14 @@ class _BrandLaunchAnimationState extends State<BrandLaunchAnimation>
 
   late final Animation<double> _opacity = TweenSequence<double>([
     TweenSequenceItem(
-      tween: Tween(begin: 0, end: 1).chain(
+      tween: Tween<double>(begin: 0.0, end: 1.0).chain(
         CurveTween(curve: Curves.easeOut),
       ),
       weight: 68,
     ),
-    TweenSequenceItem(tween: ConstantTween(1), weight: 18),
+    TweenSequenceItem(tween: ConstantTween<double>(1.0), weight: 18),
     TweenSequenceItem(
-      tween: Tween(begin: 1, end: 0).chain(
+      tween: Tween<double>(begin: 1.0, end: 0.0).chain(
         CurveTween(curve: Curves.easeIn),
       ),
       weight: 14,

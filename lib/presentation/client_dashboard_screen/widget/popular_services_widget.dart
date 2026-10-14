@@ -40,7 +40,7 @@ class PopularServicesWidget extends StatelessWidget {
     required this.onBookService,
   });
 
-  static const _serviceMaps = ServiceCatalog.services;
+  static List<Map<String, dynamic>> get _serviceMaps => ServiceCatalog.services;
 
   @override
   Widget build(BuildContext context) {
@@ -50,7 +50,7 @@ class PopularServicesWidget extends StatelessWidget {
             id: m['id'] as String,
             name: m['name'] as String,
             description: m['description'] as String,
-            price: m['price'] as int,
+            price: (m['price'] as num).toInt(),
             durationMinutes: m['durationMinutes'] as int,
             rating: (m['rating'] as num).toDouble(),
             imageUrl: m['imageUrl'] as String,

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../data/payment_booking_store.dart';
+import 'client_admin_chat_entry.dart';
 import '../../routes/app_routes.dart';
 import '../../theme/app_theme.dart';
 import './widget/dashboard_header_widget.dart';
@@ -157,18 +158,34 @@ class _ClientDashboardScreenState extends State<ClientDashboardScreen>
           ],
         ),
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: () {
-          context.push(AppRoutes.appointmentBooking);
-        },
-        backgroundColor: AppTheme.secondary,
-        foregroundColor: Colors.white,
-        icon: const Icon(Icons.add_rounded),
-        label: const Text(
-          'Book Now',
-          style: TextStyle(fontWeight: FontWeight.w700),
-        ),
-        elevation: 4,
+      floatingActionButton: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          const ClientAdminChatEntry(),
+          const SizedBox(height: 10),
+          FloatingActionButton.small(
+            heroTag: 'client-chat-fab',
+            tooltip: 'Ask E-Relax Assistant',
+            onPressed: () => context.push(AppRoutes.clientChat),
+            backgroundColor: AppTheme.primary,
+            foregroundColor: Colors.white,
+            child: const Icon(Icons.chat_bubble_outline_rounded),
+          ),
+          const SizedBox(height: 10),
+          FloatingActionButton.extended(
+            heroTag: 'client-booking-fab',
+            onPressed: () => context.push(AppRoutes.appointmentBooking),
+            backgroundColor: AppTheme.secondary,
+            foregroundColor: Colors.white,
+            icon: const Icon(Icons.add_rounded),
+            label: const Text(
+              'Book Now',
+              style: TextStyle(fontWeight: FontWeight.w700),
+            ),
+            elevation: 4,
+          ),
+        ],
       ),
     );
   }

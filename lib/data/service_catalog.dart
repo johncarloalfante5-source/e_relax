@@ -1,6 +1,11 @@
+import 'dart:async';
+
+import '../models/service.dart';
+
 /// Shared service catalog used by online booking and cashier walk-ins.
 abstract final class ServiceCatalog {
-  static const List<Map<String, dynamic>> services = [
+  static StreamSubscription<List<ClinicService>>? _subscription;
+  static const List<Map<String, dynamic>> _seed = [
     {
       'id': 'svc_001',
       'name': 'Whole Body Massage',
@@ -58,4 +63,29 @@ abstract final class ServiceCatalog {
       'category': 'Foot',
     },
   ];
+
+  static List<Map<String, dynamic>> _services = List.of(_seed);
+  static List<Map<String, dynamic>> get services => List.unmodifiable(_services);
+
+  static void replaceFromBackend(List<Map<String, dynamic>> rows) {
+    if (rows.isEmpty) return;
+    _services = rows;
+  }
+
+  static void connect(Stream<List<ClinicService>> stream) {
+    _subscription?.cancel();
+    _subscription = stream.listen((services) {
+      replaceFromBackend(services.map((service) => {
+        'id': service.id,
+        'name': service.name,
+        'description': service.description,
+        'price': service.price,
+        'durationMinutes': service.durationMinutes,
+        'rating': service.rating ?? 0,
+        'imageUrl': service.imageUrl ?? '',
+        'semanticLabel': service.semanticLabel ?? service.name,
+        'category': service.category,
+      }).toList());
+    });
+  }
 }

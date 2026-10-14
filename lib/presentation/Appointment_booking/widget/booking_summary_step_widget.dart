@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+
+import '../../../data/therapist_roster_store.dart';
+import '../../../models/booking.dart';
 import '../../../theme/app_theme.dart';
 import '../../../widget/custom_icon_widget.dart';
 
@@ -36,21 +39,14 @@ class BookingSummaryStepWidget extends StatelessWidget {
     return '${months[selectedDate!.month - 1]} ${selectedDate!.day}, ${selectedDate!.year}';
   }
 
-  String get _therapistName {
-    // TODO: Replace with real therapist lookup from Firebase
-    const names = {
-      'th_001': 'Ana Reyes',
-      'th_002': 'Carlo Mendoza',
-      'th_003': 'Liza Cruz',
-      'th_004': 'Rico Santos',
-      'th_005': 'Grace Tan',
-    };
-    return names[selectedTherapistId] ?? 'Not selected';
-  }
+  String get _therapistName => selectedTherapistId == null
+      ? 'Not selected'
+      : TherapistRosterStore.instance.findById(selectedTherapistId!)?.name ??
+            'Not selected';
 
-  int get _servicePrice => (serviceData['price'] as num).toInt();
-  int get _downPaymentAmount => (_servicePrice * 0.3).round();
-  int get _remainingBalance => _servicePrice - _downPaymentAmount;
+  double get _serviceTotal => (serviceData['price'] as num).toDouble();
+  double get _downPaymentAmount => Booking.calculateDownPayment(_serviceTotal);
+  double get _remainingBalance => _serviceTotal - _downPaymentAmount;
 
   @override
   Widget build(BuildContext context) {
@@ -150,7 +146,7 @@ class BookingSummaryStepWidget extends StatelessWidget {
               children: [
                 _buildPaymentLine(
                   serviceData['name'] as String,
-                  '₱$_servicePrice',
+                  '₱${_serviceTotal.toStringAsFixed(0)}',
                 ),
                 const SizedBox(height: 10),
                 _buildPaymentLine(
@@ -158,7 +154,6 @@ class BookingSummaryStepWidget extends StatelessWidget {
                   '${serviceData['durationMinutes']} min',
                 ),
                 const SizedBox(height: 10),
-                _buildPaymentLine('Service Fee', '₱50'),
                 const SizedBox(height: 12),
                 // Dashed divider
                 Row(
@@ -179,7 +174,7 @@ class BookingSummaryStepWidget extends StatelessWidget {
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     Text(
-                      'Total',
+                      'Service total',
                       style: GoogleFonts.plusJakartaSans(
                         fontSize: 16,
                         fontWeight: FontWeight.w800,
@@ -187,7 +182,7 @@ class BookingSummaryStepWidget extends StatelessWidget {
                       ),
                     ),
                     Text(
-                      '₱${_servicePrice + 50}',
+                      '₱${_serviceTotal.toStringAsFixed(0)}',
                       style: GoogleFonts.plusJakartaSans(
                         fontSize: 18,
                         fontWeight: FontWeight.w800,
@@ -234,7 +229,7 @@ class BookingSummaryStepWidget extends StatelessWidget {
                       ),
                       const SizedBox(height: 4),
                       Text(
-                        'A down payment of ₱$_downPaymentAmount (30%) is required to confirm your reservation. Remaining balance of ₱$_remainingBalance is due after service.',
+                        'A down payment of ₱${_downPaymentAmount.toStringAsFixed(0)} (30%) is required to confirm your reservation. Remaining balance of ₱${_remainingBalance.toStringAsFixed(0)} is due after service.',
                         style: GoogleFonts.plusJakartaSans(
                           fontSize: 12,
                           color: const Color(0xFF795548),

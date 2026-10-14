@@ -5,9 +5,11 @@ import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../../data/payment_booking_store.dart';
+import '../../data/stores/auth_session_store.dart';
 import '../../data/service_catalog.dart';
 import '../../data/therapist_roster_store.dart';
 import '../../models/booking.dart';
+import '../../models/create_booking_request.dart';
 import '../../services/booking_receipt_service.dart';
 import '../../theme/app_theme.dart';
 import '../../widget/custom_icon_widget.dart';
@@ -60,7 +62,9 @@ class _AppointmentBookingScreenState extends State<AppointmentBookingScreen>
 
     _serviceData = widget.serviceData ?? ServiceCatalog.services.first;
 
-    _selectedDate = DateTime.now().add(const Duration(days: 1));
+    final initialDate = DateTime.now().add(const Duration(days: 1));
+    _selectedDate = initialDate;
+    TherapistRosterStore.instance.watchDutyForDate(initialDate);
   }
 
   @override
@@ -70,7 +74,12 @@ class _AppointmentBookingScreenState extends State<AppointmentBookingScreen>
     super.dispose();
   }
 
-  void _nextStep() {
+  Future<void> _nextStep() async {
+    if (_selectedSlotHasPassed()) {
+      _clearExpiredTimeSelection();
+      _showError('That time has passed. Please choose another time.');
+      return;
+    }
     if (_currentStep == 0) {
       // Validate step 1
       if (_selectedTimeSlot == null) {
@@ -81,9 +90,14 @@ class _AppointmentBookingScreenState extends State<AppointmentBookingScreen>
         _showError('Please select a therapist');
         return;
       }
-      if (!_selectedTherapistIsAvailable()) {
+      if (!await _selectedTherapistIsAvailable()) {
         setState(() => _selectedTherapistId = null);
         _showError('That therapist is no longer available. Choose again.');
+        return;
+      }
+      if (_selectedSlotHasPassed()) {
+        _clearExpiredTimeSelection();
+        _showError('That time has passed. Please choose another time.');
         return;
       }
     }
@@ -126,13 +140,28 @@ class _AppointmentBookingScreenState extends State<AppointmentBookingScreen>
   }
 
   Future<void> _submitBooking() async {
-    if (!_selectedTherapistIsAvailable()) {
+    if (_selectedSlotHasPassed()) {
+      setState(() {
+        _selectedTimeSlot = null;
+        _selectedTherapistId = null;
+        _currentStep = 0;
+      });
+      _pageController.jumpToPage(0);
+      _showError('That time has passed. Please choose another time.');
+      return;
+    }
+    if (!await _selectedTherapistIsAvailable()) {
       setState(() {
         _selectedTherapistId = null;
         _currentStep = 0;
       });
       _pageController.jumpToPage(0);
       _showError('That therapist is no longer available. Please choose again.');
+      return;
+    }
+    if (_selectedSlotHasPassed()) {
+      _clearExpiredTimeSelection();
+      _showError('That time has passed. Please choose another time.');
       return;
     }
     if (_paymentReference.trim().isEmpty) {
@@ -144,61 +173,70 @@ class _AppointmentBookingScreenState extends State<AppointmentBookingScreen>
       return;
     }
     setState(() => _isLoading = true);
-    final now = DateTime.now();
-    final bookingReference = 'ER-${now.millisecondsSinceEpoch}';
-    final booking = Booking(
-      id: bookingReference,
-      referenceNumber: bookingReference,
-      clientId: localClientSessionId,
-      clientName: localClientSessionName,
-      serviceId: _serviceData['id']?.toString() ?? 'service-unknown',
-      serviceName: _serviceData['name'] as String,
-      serviceDescription: _serviceData['description']?.toString() ?? '',
-      therapistId: _selectedTherapistId ?? 'Not selected',
-      therapistName: _therapistName(_selectedTherapistId),
-      appointmentDate: _selectedDate ?? now,
-      startTime: _selectedTimeSlot ?? 'Not selected',
-      durationMinutes: (_serviceData['durationMinutes'] as num?)?.toInt() ?? 60,
-      totalAmount: (_serviceData['price'] as num).toDouble(),
-      transactionReference: _paymentReference.trim(),
-      paymentAmount: Booking.calculateDownPayment(
-        (_serviceData['price'] as num).toDouble(),
-      ),
-      receiptImage: _paymentScreenshot!,
-      paymentSubmittedAt: now,
-      createdAt: now,
-    );
-    PaymentBookingStore.instance.add(booking);
-    if (!mounted) return;
-    setState(() {
-      _booking = booking;
-      _isLoading = false;
-    });
-    _showSuccessDialog();
+    try {
+      final profile = AuthSessionStore.instance.profile;
+      if (profile == null) throw StateError('Sign in before submitting a booking.');
+      final booking = await PaymentBookingStore.instance.createOnlineBooking(
+        CreateBookingRequest(
+          serviceId: _serviceData['id']?.toString() ?? '',
+          therapistId: _selectedTherapistId!,
+          appointmentDate: _selectedDate!,
+          startTime: _selectedTimeSlot!,
+          clientName: profile.displayName,
+          clientPhone: profile.phone ?? '',
+          clientEmail: profile.email ?? '',
+          transactionReference: _paymentReference,
+          proof: _paymentScreenshot!,
+        ),
+      );
+      if (!mounted) return;
+      setState(() { _booking = booking; _isLoading = false; });
+      _showSuccessDialog();
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _isLoading = false);
+      _showError('Booking could not be submitted: $error');
+    }
   }
 
-  bool _selectedTherapistIsAvailable() {
+  Future<bool> _selectedTherapistIsAvailable() async {
     final therapistId = _selectedTherapistId;
     final date = _selectedDate;
     final time = _selectedTimeSlot;
     if (therapistId == null || date == null || time == null) return false;
     final duration = (_serviceData['durationMinutes'] as num?)?.toInt() ?? 60;
-    return TherapistRosterStore.instance
-        .availableForBooking(
+    final available = await TherapistRosterStore.instance.availableForBookingRemote(
           date: date,
           startTime: time,
           durationMinutes: duration,
-        )
-        .any((therapist) => therapist.id == therapistId);
+          serviceId: _serviceData['id']?.toString() ?? '',
+        );
+    return available.any((therapist) => therapist.id == therapistId);
   }
 
-  String _therapistName(String? therapistId) => switch (therapistId) {
-    'th_001' => 'Ana Reyes',
-    'th_002' => 'Carlo Mendoza',
-    'th_003' => 'Liza Cruz',
-    'th_004' => 'Rico Santos',
-    _ => therapistId ?? 'Not selected',
-  };
+  bool _selectedSlotHasPassed() {
+    final date = _selectedDate;
+    final time = _selectedTimeSlot;
+    return date != null &&
+        time != null &&
+        isAppointmentTimePast(date, time);
+  }
+
+  void _clearExpiredTimeSelection() {
+    final shouldReturnToSelection = _currentStep > 0;
+    setState(() {
+      _selectedTimeSlot = null;
+      _selectedTherapistId = null;
+      if (shouldReturnToSelection) _currentStep = 0;
+    });
+    if (shouldReturnToSelection) _pageController.jumpToPage(0);
+  }
+
+  String _therapistName(String? therapistId) {
+    if (therapistId == null) return 'Not selected';
+    return TherapistRosterStore.instance.findById(therapistId)?.name ??
+        'Not selected';
+  }
 
   Future<void> _downloadReceipt() async {
     final booking = _booking;
@@ -333,6 +371,7 @@ class _AppointmentBookingScreenState extends State<AppointmentBookingScreen>
                 ),
                 // Step 3: Payment
                 PaymentStepWidget(
+                  totalAmount: (_serviceData['price'] as num).toDouble(),
                   amountDue: Booking.calculateDownPayment(
                     (_serviceData['price'] as num).toDouble(),
                   ),
@@ -515,10 +554,10 @@ class _AppointmentBookingScreenState extends State<AppointmentBookingScreen>
           const SizedBox(height: 12),
           DaySelectorWidget(
             selectedDate: _selectedDate,
-            onDateSelected: (date) => setState(() {
-              _selectedDate = date;
-              _selectedTherapistId = null;
-            }),
+            onDateSelected: (date) async {
+              setState(() { _selectedDate = date; _selectedTherapistId = null; });
+              await TherapistRosterStore.instance.watchDutyForDate(date);
+            },
           ),
           const SizedBox(height: 24),
 
@@ -538,6 +577,12 @@ class _AppointmentBookingScreenState extends State<AppointmentBookingScreen>
               _selectedTimeSlot = time;
               _selectedTherapistId = null;
             }),
+            onSelectedTimeExpired: () {
+              if (_selectedSlotHasPassed()) {
+                _clearExpiredTimeSelection();
+                _showError('That time has passed. Please choose another time.');
+              }
+            },
             selectedDate: _selectedDate,
           ),
           const SizedBox(height: 24),
@@ -560,6 +605,8 @@ class _AppointmentBookingScreenState extends State<AppointmentBookingScreen>
             selectedTimeSlot: _selectedTimeSlot,
             durationMinutes:
                 (_serviceData['durationMinutes'] as num?)?.toInt() ?? 60,
+            serviceId: _serviceData['id']?.toString(),
+            serviceName: _serviceData['name'] as String?,
           ),
           // Space for bottom CTA
           const SizedBox(height: 20),

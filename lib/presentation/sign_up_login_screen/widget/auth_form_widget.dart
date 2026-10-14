@@ -8,6 +8,7 @@ class AuthFormWidget extends StatefulWidget {
   final bool isLoading;
   final void Function(Map<String, String> formData) onSubmit;
   final VoidCallback onToggleMode;
+  final Future<void> Function(String email)? onResetPassword;
 
   const AuthFormWidget({
     super.key,
@@ -15,6 +16,7 @@ class AuthFormWidget extends StatefulWidget {
     required this.isLoading,
     required this.onSubmit,
     required this.onToggleMode,
+    this.onResetPassword,
   });
 
   @override
@@ -157,13 +159,28 @@ class _AuthFormWidgetState extends State<AuthFormWidget> {
                   ],
                 ),
                 TextButton(
-                  onPressed: () {
-                    // TODO: Navigate to forgot password screen
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('Password reset email sent'),
-                      ),
-                    );
+                  onPressed: () async {
+                    final email = _emailController.text.trim();
+                    if (email.isEmpty) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Enter your email address first.')),
+                      );
+                      return;
+                    }
+                    try {
+                      await widget.onResetPassword?.call(email);
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Password reset email sent.')),
+                        );
+                      }
+                    } catch (error) {
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('Could not send reset email: $error')),
+                        );
+                      }
+                    }
                   },
                   style: TextButton.styleFrom(
                     foregroundColor: AppTheme.primary,

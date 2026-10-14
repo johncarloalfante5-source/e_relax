@@ -1,3 +1,6 @@
+import 'dart:typed_data';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../../data/service_catalog.dart';
@@ -19,6 +22,7 @@ class _TherapistManagementScreenState extends State<TherapistManagementScreen> {
   @override
   void initState() {
     super.initState();
+    TherapistRosterStore.instance.watchDutyForDate(_selectedDate);
     _selectedTherapistIds = TherapistRosterStore.instance
         .onDutyForDate(_selectedDate)
         .map((therapist) => therapist.id)
@@ -158,15 +162,22 @@ class _TherapistManagementScreenState extends State<TherapistManagementScreen> {
                   child: ListTile(
                     leading: CircleAvatar(
                       backgroundColor: AppTheme.primaryContainer,
-                      child: Text(
-                        therapist.name.isEmpty
-                            ? '?'
-                            : therapist.name[0].toUpperCase(),
-                        style: const TextStyle(
-                          color: AppTheme.primary,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
+                      backgroundImage: therapist.profileImageBytes == null
+                          ? (TherapistRosterStore.instance.photoUrl(therapist) == null
+                              ? null
+                              : NetworkImage(TherapistRosterStore.instance.photoUrl(therapist)!))
+                          : MemoryImage(therapist.profileImageBytes!) as ImageProvider,
+                      child: therapist.profileImageBytes == null && TherapistRosterStore.instance.photoUrl(therapist) == null
+                          ? Text(
+                              therapist.name.isEmpty
+                                  ? '?'
+                                  : therapist.name[0].toUpperCase(),
+                              style: const TextStyle(
+                                color: AppTheme.primary,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            )
+                          : null,
                     ),
                     title: Text(
                       therapist.name,
@@ -197,25 +208,23 @@ class _TherapistManagementScreenState extends State<TherapistManagementScreen> {
       lastDate: DateTime.now().add(const Duration(days: 365 * 2)),
     );
     if (date == null || !mounted) return;
-    setState(() {
-      _selectedDate = DateUtils.dateOnly(date);
-      _selectedTherapistIds = TherapistRosterStore.instance
-          .onDutyForDate(_selectedDate)
-          .map((therapist) => therapist.id)
-          .toSet();
-    });
+    setState(() => _selectedDate = DateUtils.dateOnly(date));
+    await TherapistRosterStore.instance.watchDutyForDate(_selectedDate);
+    if (mounted) setState(() => _selectedTherapistIds = TherapistRosterStore.instance
+        .onDutyForDate(_selectedDate).map((therapist) => therapist.id).toSet());
   }
 
-  void _saveDuty() {
-    TherapistRosterStore.instance.setDutyForDate(
-      _selectedDate,
-      _selectedTherapistIds,
-    );
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Duty roster saved for ${_formatDate(_selectedDate)}'),
-      ),
-    );
+  Future<void> _saveDuty() async {
+    try {
+      await TherapistRosterStore.instance.setDutyForDate(_selectedDate, _selectedTherapistIds);
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Duty roster saved for ${_formatDate(_selectedDate)}')),
+      );
+    } catch (error) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not save duty roster: $error')),
+      );
+    }
   }
 
   Future<void> _editTherapist(
@@ -225,6 +234,7 @@ class _TherapistManagementScreenState extends State<TherapistManagementScreen> {
     final name = TextEditingController(text: therapist?.name ?? '');
     final email = TextEditingController(text: therapist?.email ?? '');
     final phone = TextEditingController(text: therapist?.phone ?? '');
+    Uint8List? profileImageBytes = therapist?.profileImageBytes;
     final specialties = ServiceCatalog.services
         .map((service) => service['name'] as String)
         .toSet()
@@ -233,7 +243,9 @@ class _TherapistManagementScreenState extends State<TherapistManagementScreen> {
         ? therapist!.specialty
         : specialties.first;
     final formKey = GlobalKey<FormState>();
-    final result = await showDialog<(String, String, String, String)>(
+    final result = await showDialog<
+      (String, String, String, String, Uint8List?)
+    >(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (dialogContext, setDialogState) => AlertDialog(
@@ -247,6 +259,68 @@ class _TherapistManagementScreenState extends State<TherapistManagementScreen> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     _textField(name, 'Full name'),
+                    const SizedBox(height: 12),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        'Profile photo (optional)',
+                        style: Theme.of(dialogContext).textTheme.labelLarge,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        CircleAvatar(
+                          radius: 30,
+                          backgroundColor: AppTheme.primaryContainer,
+                          backgroundImage: profileImageBytes == null
+                              ? null
+                              : MemoryImage(profileImageBytes!),
+                          child: profileImageBytes == null
+                              ? const Icon(
+                                  Icons.person_outline_rounded,
+                                  color: AppTheme.primary,
+                                )
+                              : null,
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: () async {
+                              try {
+                                final files = await FilePicker.pickFiles(
+                                  type: FileType.image,
+                                );
+                                if (files.isEmpty) return;
+                                final bytes = await files.first.readAsBytes();
+                                if (!dialogContext.mounted) return;
+                                setDialogState(() => profileImageBytes = bytes);
+                              } catch (_) {
+                                if (!dialogContext.mounted) return;
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('Could not load that image.'),
+                                  ),
+                                );
+                              }
+                            },
+                            icon: const Icon(Icons.upload_file_outlined),
+                            label: Text(
+                              profileImageBytes == null
+                                  ? 'Add profile photo'
+                                  : 'Change profile photo',
+                            ),
+                          ),
+                        ),
+                        if (profileImageBytes != null)
+                          IconButton(
+                            tooltip: 'Remove profile photo',
+                            onPressed: () =>
+                                setDialogState(() => profileImageBytes = null),
+                            icon: const Icon(Icons.close_rounded),
+                          ),
+                      ],
+                    ),
                     const SizedBox(height: 12),
                     DropdownButtonFormField<String>(
                       value: selectedSpecialty,
@@ -275,13 +349,15 @@ class _TherapistManagementScreenState extends State<TherapistManagementScreen> {
                     const SizedBox(height: 12),
                     _textField(
                       email,
-                      'Login email',
+                      'Login email (optional)',
+                      isRequired: false,
                       keyboard: TextInputType.emailAddress,
                     ),
                     const SizedBox(height: 12),
                     _textField(
                       phone,
-                      'Contact number',
+                      'Contact number (optional)',
+                      isRequired: false,
                       keyboard: TextInputType.phone,
                     ),
                   ],
@@ -302,6 +378,7 @@ class _TherapistManagementScreenState extends State<TherapistManagementScreen> {
                   selectedSpecialty,
                   email.text.trim(),
                   phone.text.trim(),
+                  profileImageBytes,
                 ));
               },
               child: const Text('Save'),
@@ -314,20 +391,28 @@ class _TherapistManagementScreenState extends State<TherapistManagementScreen> {
     email.dispose();
     phone.dispose();
     if (result == null) return;
-    if (therapist == null) {
-      TherapistRosterStore.instance.addTherapist(
+    try {
+      if (therapist == null) {
+      await TherapistRosterStore.instance.addTherapist(
         name: result.$1,
         specialty: result.$2,
         email: result.$3,
         phone: result.$4,
+        profileImageBytes: result.$5,
       );
-    } else {
-      TherapistRosterStore.instance.updateTherapist(
+      } else {
+      await TherapistRosterStore.instance.updateTherapist(
         therapist.id,
         name: result.$1,
         specialty: result.$2,
         email: result.$3,
         phone: result.$4,
+        profileImageBytes: result.$5,
+      );
+      }
+    } catch (error) {
+      if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not save therapist: $error')),
       );
     }
   }

@@ -3,6 +3,8 @@ import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../../../data/payment_booking_store.dart';
+import '../../../data/stores/auth_session_store.dart';
+import '../../../data/therapist_roster_store.dart';
 import '../../../routes/app_routes.dart';
 import '../../../theme/app_theme.dart';
 
@@ -42,7 +44,7 @@ class DashboardHeaderWidget extends StatelessWidget {
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      'Hello, ${ClientSession.instance.clientName}',
+                      'Hello, ${AuthSessionStore.instance.profile?.displayName ?? ClientSession.instance.clientName}',
                       style: GoogleFonts.plusJakartaSans(
                         fontSize: 22,
                         fontWeight: FontWeight.w800,
@@ -108,8 +110,19 @@ class DashboardHeaderWidget extends StatelessWidget {
     );
 
     if (shouldLogout == true && context.mounted) {
-      ClientSession.instance.signOut();
-      context.go(AppRoutes.signUpLogin);
+      try {
+        await AuthSessionStore.instance.signOut();
+        ClientSession.instance.signOut();
+        await PaymentBookingStore.instance.clearSession();
+        await TherapistRosterStore.instance.initialize();
+        if (context.mounted) context.go(AppRoutes.signUpLogin);
+      } catch (error) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Could not log out: $error')),
+          );
+        }
+      }
     }
   }
 

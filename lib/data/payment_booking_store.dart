@@ -1,9 +1,16 @@
+import 'dart:async';
+import 'dart:typed_data';
+
 import 'package:flutter/foundation.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../models/booking.dart';
+import '../models/create_booking_request.dart';
+import 'backend/supabase_client_provider.dart';
+import 'repositories/supabase_booking_repository.dart';
+import 'stores/auth_session_store.dart';
 
-/// Active prototype client identity. Replace this with the authenticated user
-/// from the backend when real authentication is connected.
+/// Small view adapter for the authenticated Supabase profile.
 class ClientSession extends ChangeNotifier {
   ClientSession._();
 
@@ -12,26 +19,29 @@ class ClientSession extends ChangeNotifier {
 
   String? _email;
   String? _name;
+  String? _id;
 
-  String get clientId =>
-      _email == null ? 'local-client-session' : 'local-client:' + _email!;
+  String get clientId => _id ?? (_email == null ? 'local-client-session' : 'local-client:' + _email!);
   String get clientName => _name ?? 'Client';
   String? get email => _email;
 
-  void signIn({required String email, String? displayName}) {
-    final normalizedEmail = email.trim().toLowerCase();
+  void signIn({required String? email, String? displayName, String? clientId}) {
+    final normalizedEmail = email?.trim().toLowerCase() ?? '';
     final submittedName = displayName?.trim();
     if (submittedName != null && submittedName.isNotEmpty) {
-      _knownNames[normalizedEmail] = submittedName;
+      if (normalizedEmail.isNotEmpty) _knownNames[normalizedEmail] = submittedName;
     }
-    _email = normalizedEmail;
-    _name = _knownNames[normalizedEmail] ?? _nameFromEmail(normalizedEmail);
+    _email = normalizedEmail.isEmpty ? null : normalizedEmail;
+    _id = clientId;
+    _name = _knownNames[normalizedEmail] ?? submittedName ??
+        (normalizedEmail.isEmpty ? 'Client' : _nameFromEmail(normalizedEmail));
     notifyListeners();
   }
 
   void signOut() {
     _email = null;
     _name = null;
+    _id = null;
     notifyListeners();
   }
 
@@ -85,14 +95,91 @@ class ClientPaymentNotice {
   bool isRead = false;
 }
 
-/// Demo repository and notifier. Persist through an authenticated server API
-/// before relying on it for real appointments or payment decisions.
+/// Notifier backed by the authenticated booking and notification repositories.
 class PaymentBookingStore extends ChangeNotifier {
   PaymentBookingStore();
   static final PaymentBookingStore instance = PaymentBookingStore();
 
   final List<Booking> _bookings = [];
   final List<ClientPaymentNotice> _notices = [];
+  final _repository = SupabaseBookingRepository();
+  StreamSubscription<List<Booking>>? _bookingSubscription;
+  StreamSubscription<List<Map<String, dynamic>>>? _noticeSubscription;
+
+  Future<void> initialize() async {
+    final profile = AuthSessionStore.instance.profile;
+    if (profile == null) return;
+    await _bookingSubscription?.cancel();
+    final bookingStream = profile.role.name == 'client'
+        ? _repository.watchForClient()
+        : _repository.watchForStaff();
+    _bookingSubscription = bookingStream.listen((items) {
+      _bookings
+        ..clear()
+        ..addAll(items);
+      notifyListeners();
+    }, onError: (Object error) {
+      _loadError = error.toString();
+      notifyListeners();
+    });
+    await _noticeSubscription?.cancel();
+    final userId = SupabaseClientProvider.client.auth.currentUser!.id;
+    final initialNotices = await SupabaseClientProvider.client
+        .from('notifications').select().eq('user_id', userId).order('created_at', ascending: false);
+    _replaceNotices(initialNotices);
+    _noticeSubscription = SupabaseClientProvider.client.from('notifications')
+        .stream(primaryKey: ['id']).eq('user_id', userId).listen(_replaceNotices,
+          onError: (Object error) { _loadError = error.toString(); notifyListeners(); });
+  }
+
+  Future<void> clearSession() async {
+    await _bookingSubscription?.cancel();
+    await _noticeSubscription?.cancel();
+    _bookingSubscription = null;
+    _noticeSubscription = null;
+    _bookings.clear();
+    _notices.clear();
+    notifyListeners();
+  }
+
+  String? _loadError;
+  String? get loadError => _loadError;
+
+  void _replaceNotices(List<Map<String, dynamic>> rows) {
+    _notices
+      ..clear()
+      ..addAll(rows.map((row) {
+        final key = row['event_key'] as String? ?? '';
+        final type = key.startsWith('payment_verified') ? ClientNoticeType.paymentVerified
+            : key.startsWith('payment_rejected') ? ClientNoticeType.paymentRejected
+            : key.startsWith('proof_resubmitted') ? ClientNoticeType.proofResubmitted
+            : key.startsWith('balance_collected') ? ClientNoticeType.balanceCollected
+            : ClientNoticeType.bookingConfirmed;
+        final notice = ClientPaymentNotice(id: row['id'] as String,
+          clientId: row['user_id'] as String, bookingId: row['booking_id'] as String? ?? '',
+          type: type, message: '${row['title']}: ${row['message']}',
+          createdAt: DateTime.parse(row['created_at'] as String));
+        notice.isRead = row['read_at'] != null;
+        return notice;
+      }));
+    notifyListeners();
+  }
+
+  Future<void> refresh() async {
+    final profile = AuthSessionStore.instance.profile;
+    if (profile == null) return;
+    final stream = profile.role.name == 'client' ? _repository.watchForClient() : _repository.watchForStaff();
+    final items = await stream.first;
+    _bookings..clear()..addAll(items);
+    notifyListeners();
+  }
+
+  Future<Booking> createOnlineBooking(CreateBookingRequest request) async {
+    final booking = await _repository.createOnlineBooking(request);
+    _bookings.insert(0, booking);
+    notifyListeners();
+    return booking;
+  }
 
   List<Booking> get bookings => List.unmodifiable(_bookings);
   List<ClientPaymentNotice> get notices => List.unmodifiable(_notices);
@@ -114,10 +201,11 @@ class PaymentBookingStore extends ChangeNotifier {
       .where((notice) => notice.clientId == clientId && !notice.isRead)
       .length;
 
-  void markNoticeRead(String noticeId, {required String clientId}) {
+  Future<void> markNoticeRead(String noticeId, {required String clientId}) async {
     for (final notice in _notices) {
       if (notice.id == noticeId && notice.clientId == clientId) {
         if (!notice.isRead) {
+          await _repository.markNotificationRead(noticeId);
           notice.isRead = true;
           notifyListeners();
         }
@@ -126,15 +214,12 @@ class PaymentBookingStore extends ChangeNotifier {
     }
   }
 
-  void markAllNoticesRead(String clientId) {
-    var changed = false;
-    for (final notice in _notices) {
-      if (notice.clientId == clientId && !notice.isRead) {
-        notice.isRead = true;
-        changed = true;
-      }
+  Future<void> markAllNoticesRead(String clientId) async {
+    for (final notice in _notices.where((item) => item.clientId == clientId && !item.isRead)) {
+      await _repository.markNotificationRead(notice.id);
+      notice.isRead = true;
     }
-    if (changed) notifyListeners();
+    notifyListeners();
   }
 
   Booking? findById(String bookingId) {
@@ -144,17 +229,9 @@ class PaymentBookingStore extends ChangeNotifier {
     return null;
   }
 
-  void add(Booking booking) {
-    if (findById(booking.id) != null) {
-      throw StateError('A booking with this ID already exists.');
-    }
-    _bookings.insert(0, booking);
-    notifyListeners();
-  }
-
-  bool verifyPayment(String bookingId, {required String adminId}) {
+  Future<bool> verifyPayment(String bookingId, {required String adminId}) async {
     final booking = findById(bookingId);
-    if (booking == null ||
+    if (booking == null || booking.latestProof.id == null ||
         booking.paymentStatus != PaymentStatus.pendingVerification) {
       return false;
     }
@@ -165,69 +242,38 @@ class PaymentBookingStore extends ChangeNotifier {
       return false;
     }
 
-    final now = DateTime.now();
-    booking
-      ..paymentStatus = PaymentStatus.verified
-      ..paymentReviewedAt = now
-      ..paymentReviewedBy = adminId
-      ..paymentRejectionReason = null
-      ..updatedAt = now;
-    booking.latestProof
-      ..reviewedAt = now
-      ..reviewedBy = adminId;
-    _audit(booking, BookingActivityType.paymentVerified, adminId);
-    _addNoticeOnce(
-      id: 'verified:${booking.id}:${booking.proofSubmissions.length}',
-      booking: booking,
-      type: ClientNoticeType.paymentVerified,
-      message:
-          'The 30% down payment for ${booking.serviceName} was verified. Appointment: ${_date(booking.appointmentDate)} at ${booking.startTime}. Booking status: ${booking.bookingStatus.label}.',
-    );
-    notifyListeners();
-    return true;
+    try {
+      await _repository.verifyPayment(booking.latestProof.id!);
+      await refresh();
+      return true;
+    } catch (error) { _loadError = error.toString(); notifyListeners(); return false; }
   }
 
-  bool rejectPayment(
+  Future<bool> rejectPayment(
     String bookingId, {
     required String adminId,
     required String reason,
-  }) {
+  }) async {
     final booking = findById(bookingId);
     final cleanReason = reason.trim();
-    if (booking == null ||
+    if (booking == null || booking.latestProof.id == null ||
         booking.paymentStatus != PaymentStatus.pendingVerification ||
         cleanReason.isEmpty) {
       return false;
     }
-    final now = DateTime.now();
-    booking
-      ..paymentStatus = PaymentStatus.rejected
-      ..paymentReviewedAt = now
-      ..paymentReviewedBy = adminId
-      ..paymentRejectionReason = cleanReason
-      ..updatedAt = now;
-    booking.latestProof
-      ..reviewedAt = now
-      ..reviewedBy = adminId
-      ..rejectionReason = cleanReason;
-    _audit(booking, BookingActivityType.paymentRejected, adminId, cleanReason);
-    _addNoticeOnce(
-      id: 'rejected:${booking.id}:${booking.proofSubmissions.length}',
-      booking: booking,
-      type: ClientNoticeType.paymentRejected,
-      message:
-          'Payment proof for ${booking.serviceName} was rejected: $cleanReason',
-    );
-    notifyListeners();
-    return true;
+    try {
+      await _repository.rejectPayment(booking.latestProof.id!, reason: cleanReason);
+      await refresh();
+      return true;
+    } catch (error) { _loadError = error.toString(); notifyListeners(); return false; }
   }
 
-  bool resubmitProof(
+  Future<bool> resubmitProof(
     String bookingId, {
     required String clientId,
     required String reference,
     required Uint8List screenshot,
-  }) {
+  }) async {
     final booking = findById(bookingId);
     final cleanReference = reference.trim();
     if (booking == null ||
@@ -237,46 +283,28 @@ class PaymentBookingStore extends ChangeNotifier {
         screenshot.isEmpty) {
       return false;
     }
-    final now = DateTime.now();
-    booking.proofSubmissions.add(
-      PaymentProofSubmission(
-        transactionReference: cleanReference,
-        amount: booking.requiredDownPayment,
-        screenshot: screenshot,
-        submittedAt: now,
-      ),
-    );
-    booking
-      ..paymentStatus = PaymentStatus.pendingVerification
-      ..paymentAmount = booking.requiredDownPayment
-      ..paymentSubmittedAt = now
-      ..paymentReviewedAt = null
-      ..paymentReviewedBy = null
-      ..paymentRejectionReason = null
-      ..updatedAt = now;
-    _audit(booking, BookingActivityType.proofSubmitted, clientId);
-    _addNoticeOnce(
-      id: 'resubmitted:${booking.id}:${booking.proofSubmissions.length}',
-      booking: booking,
-      type: ClientNoticeType.proofResubmitted,
-      message:
-          'Updated payment proof for ${booking.serviceName} was submitted and is awaiting review.',
-    );
-    notifyListeners();
-    return true;
+    try {
+      await _repository.resubmitProof(bookingId, reference: cleanReference, proof: screenshot);
+      await refresh();
+      return true;
+    } catch (error) { _loadError = error.toString(); notifyListeners(); return false; }
   }
 
-  bool collectBalance(
+  Future<bool> collectBalance(
     String bookingId, {
     required double amount,
     required String method,
     required String cashierId,
-  }) {
+  }) async {
     final booking = findById(bookingId);
     const methods = {'Cash', 'Card', 'GCash'};
     if (booking == null ||
         booking.paymentStatus != PaymentStatus.verified ||
-        booking.bookingStatus != BookingStatus.completed ||
+        !{
+          BookingStatus.checkedIn,
+          BookingStatus.inProgress,
+          BookingStatus.completed,
+        }.contains(booking.bookingStatus) ||
         booking.balancePayment != null ||
         booking.remainingBalance <= 0 ||
         amount != booking.remainingBalance ||
@@ -284,24 +312,44 @@ class PaymentBookingStore extends ChangeNotifier {
       return false;
     }
 
-    final now = DateTime.now();
-    booking
-      ..balancePayment = BalancePayment(
-        amount: amount,
-        method: method,
-        collectedAt: now,
-        collectedBy: cashierId,
-      )
-      ..updatedAt = now;
-    _audit(booking, BookingActivityType.balanceCollected, cashierId);
-    _addNoticeOnce(
-      id: 'balance-collected:${booking.id}',
-      booking: booking,
-      type: ClientNoticeType.balanceCollected,
-      message:
-          'The remaining balance of PHP ${amount.toStringAsFixed(2)} for ${booking.serviceName} was collected. Your booking is paid in full.',
+    try {
+      await SupabaseClientProvider.client.rpc(
+        'collect_online_balance',
+        params: {'p_booking_id': bookingId, 'p_method': method},
+      );
+    } catch (error) {
+      _loadError = error.toString();
+      notifyListeners();
+      return false;
+    }
+
+    // The RPC has committed the payment. Reflect that success immediately so a
+    // subsequent realtime/read refresh failure cannot report a failed payment
+    // or leave the cashier able to submit the collection again.
+    booking.balancePayment = BalancePayment(
+      amount: amount,
+      method: method,
+      collectedAt: DateTime.now().toUtc(),
+      collectedBy: cashierId,
+    );
+    booking.activity.add(
+      BookingActivity(
+        type: BookingActivityType.balanceCollected,
+        at: booking.balancePayment!.collectedAt,
+        actor: cashierId,
+        note: method,
+      ),
     );
     notifyListeners();
+
+    try {
+      await refresh();
+    } catch (error) {
+      // Keep the successful payment state in memory; a later stream update or
+      // screen reload can synchronize the rest of the booking data.
+      _loadError = error.toString();
+      notifyListeners();
+    }
     return true;
   }
 
@@ -318,12 +366,12 @@ class PaymentBookingStore extends ChangeNotifier {
     };
   }
 
-  bool transitionBooking(
+  Future<bool> transitionBooking(
     String bookingId, {
     required BookingStatus next,
     required String adminId,
     String? reason,
-  }) {
+  }) async {
     final booking = findById(bookingId);
     if (booking == null || !canTransition(booking, next)) return false;
     final cleanReason = reason?.trim();
@@ -331,47 +379,11 @@ class PaymentBookingStore extends ChangeNotifier {
         (cleanReason == null || cleanReason.isEmpty)) {
       return false;
     }
-    final now = DateTime.now();
-    booking
-      ..bookingStatus = next
-      ..updatedAt = now;
-    switch (next) {
-      case BookingStatus.confirmed:
-        _audit(booking, BookingActivityType.bookingConfirmed, adminId);
-        _addNoticeOnce(
-          id: 'booking-confirmed:${booking.id}',
-          booking: booking,
-          type: ClientNoticeType.bookingConfirmed,
-          message:
-              '${booking.serviceName} is confirmed for ${_date(booking.appointmentDate)} at ${booking.startTime}.',
-        );
-        break;
-      case BookingStatus.checkedIn:
-        booking.checkedInAt = now;
-        _audit(booking, BookingActivityType.clientCheckedIn, adminId);
-        break;
-      case BookingStatus.inProgress:
-        booking.serviceStartedAt = now;
-        _audit(booking, BookingActivityType.serviceStarted, adminId);
-        break;
-      case BookingStatus.completed:
-        booking.serviceCompletedAt = now;
-        _audit(booking, BookingActivityType.serviceCompleted, adminId);
-        break;
-      case BookingStatus.cancelled:
-        booking.cancellationReason = cleanReason;
-        _audit(
-          booking,
-          BookingActivityType.bookingCancelled,
-          adminId,
-          cleanReason,
-        );
-        break;
-      case BookingStatus.pendingPayment:
-        return false;
-    }
-    notifyListeners();
-    return true;
+    try {
+      await _repository.transition(bookingId, next, reason: cleanReason);
+      await refresh();
+      return true;
+    } catch (error) { _loadError = error.toString(); notifyListeners(); return false; }
   }
 
   void _audit(

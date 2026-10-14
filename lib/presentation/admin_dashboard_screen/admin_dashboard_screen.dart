@@ -2,11 +2,21 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../data/payment_booking_store.dart';
+import '../../data/repositories/client_admin_chat_repository.dart';
+import '../../data/stores/auth_session_store.dart';
 import '../../data/service_catalog.dart';
 import '../../data/therapist_roster_store.dart';
+import '../../data/repositories/cashier_repository.dart';
+import '../../data/repositories/supabase_cashier_repository.dart';
 import '../../models/booking.dart';
+import '../../models/client_admin_chat.dart';
+import '../../models/payment_transaction.dart';
+import '../../models/profile.dart';
+import '../../models/walk_in.dart';
+import '../../presentation/admin_dashboard_screen/admin_client_chats_panel.dart';
 import '../../services/booking_receipt_service.dart';
 import '../../services/report_pdf_service.dart';
 import '../../routes/app_routes.dart';
@@ -30,25 +40,110 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
   DateTimeRange? _customSalesRange;
   _SalesPeriod _servicePeriod = _SalesPeriod.daily;
   DateTimeRange? _customServiceRange;
+  _SalesPeriod _therapistProfitPeriod = _SalesPeriod.daily;
+  DateTimeRange? _customTherapistProfitRange;
   final List<_Sale> _sales = [];
-  final List<_WalkIn> _walkIns = [];
+  final List<WalkIn> _walkIns = [];
+  final _cashierRepository = SupabaseCashierRepository();
+  final _clientAdminChatRepository = ClientAdminChatRepository();
+  final List<ClientAdminConversation> _adminChatInbox = [];
+  RealtimeChannel? _adminChatChannel;
+  Timer? _adminChatRefreshTimer;
+  bool _adminChatLoading = false;
+  String? _adminChatError;
+  StreamSubscription<List<WalkIn>>? _walkInSubscription;
+  StreamSubscription<List<PaymentTransaction>>? _salesSubscription;
   Timer? _walkInTicker;
 
-  double get _salesTotal =>
-      _sales.fold<double>(0, (sum, sale) => sum + sale.amount) +
-      PaymentBookingStore.instance.bookings
-          .where((booking) => booking.paymentStatus == PaymentStatus.verified)
-          .fold<double>(
-            0,
-            (sum, booking) =>
-                sum +
-                booking.paymentAmount +
-                (booking.balancePayment?.amount ?? 0),
-          );
+  double get _salesTotal => _sales.fold<double>(0, (sum, sale) => sum + sale.amount);
+
+  @override
+  void initState() {
+    super.initState();
+    _walkInTicker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
+    _walkInSubscription = _cashierRepository.watchWalkIns().listen((items) {
+      if (mounted) setState(() { _walkIns..clear()..addAll(items); });
+    }, onError: (Object error) { if (mounted) _showBackendError(error); });
+    _salesSubscription = _cashierRepository.watchPaymentTransactions(
+      PaymentDateRange(start: DateTime(2000), end: DateTime(2200)),
+    ).listen((items) {
+      if (mounted) setState(() {
+        _sales
+          ..clear()
+          ..addAll(items.map((item) => _Sale(item.customer, '${item.service} · ${item.sourceType}', item.amount,
+              TimeOfDay.fromDateTime(item.capturedAt).format(context), item.method, createdAt: item.capturedAt, source: _saleSource(item.sourceType))));
+      });
+    }, onError: (Object error) { if (mounted) _showBackendError(error); });
+    if (_isAdmin) {
+      _adminChatChannel = _clientAdminChatRepository.watchInbox(
+        onChange: _scheduleAdminChatRefresh,
+      );
+      unawaited(_refreshAdminChatInbox());
+    }
+  }
+
+  bool get _isAdmin => AuthSessionStore.instance.profile?.role == AppRole.admin;
+
+  int get _unreadAdminConversations =>
+      _adminChatInbox.where((conversation) => conversation.unreadCount > 0).length;
+
+  void _scheduleAdminChatRefresh() {
+    _adminChatRefreshTimer?.cancel();
+    _adminChatRefreshTimer = Timer(
+      const Duration(milliseconds: 250),
+      () => unawaited(_refreshAdminChatInbox()),
+    );
+  }
+
+  Future<void> _refreshAdminChatInbox() async {
+    if (!_isAdmin) return;
+    if (mounted) {
+      setState(() {
+        _adminChatLoading = true;
+        _adminChatError = null;
+      });
+    }
+    try {
+      final conversations = await _clientAdminChatRepository.fetchAdminInbox();
+      if (!mounted) return;
+      setState(() {
+        _adminChatInbox
+          ..clear()
+          ..addAll(conversations);
+        _adminChatLoading = false;
+        _adminChatError = null;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _adminChatLoading = false;
+        _adminChatError = 'Could not load chats. Check your connection.';
+      });
+    }
+  }
+
+  void _showBackendError(Object error) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not sync dashboard: $error')));
+  }
+
+  String _saleSource(String sourceType) => switch (sourceType) {
+    'booking_deposit' => 'Online booking · down payment',
+    'booking_balance' => 'Online booking · balance',
+    _ => 'Walk-in checkout',
+  };
 
   @override
   void dispose() {
     _walkInTicker?.cancel();
+    _walkInSubscription?.cancel();
+    _salesSubscription?.cancel();
+    _adminChatRefreshTimer?.cancel();
+    final chatChannel = _adminChatChannel;
+    if (chatChannel != null) {
+      unawaited(_clientAdminChatRepository.removeChannel(chatChannel));
+    }
     _bookingSearchController.dispose();
     super.dispose();
   }
@@ -76,17 +171,40 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     );
 
     if (shouldLogout == true && mounted) {
-      context.go(AppRoutes.initial);
+      try {
+        await AuthSessionStore.instance.signOut();
+        await PaymentBookingStore.instance.clearSession();
+        await TherapistRosterStore.instance.initialize();
+        if (mounted) context.go(AppRoutes.initial);
+      } catch (error) {
+        _showBackendError(error);
+      }
     }
   }
 
-  void _refreshDashboard() {
-    setState(() {});
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Dashboard refreshed from available session data.'),
-      ),
-    );
+  Future<void> _refreshDashboard() async {
+    try {
+      await Future.wait([
+        PaymentBookingStore.instance.refresh(),
+        TherapistRosterStore.instance.refreshTherapists(),
+        TherapistRosterStore.instance.refreshDuty(DateTime.now()),
+      ]);
+      final walks = await _cashierRepository.watchWalkIns().first;
+      final transactions = await _cashierRepository.watchPaymentTransactions(
+        PaymentDateRange(start: DateTime(2000), end: DateTime(2200)),
+      ).first;
+      if (!mounted) return;
+      setState(() {
+        _walkIns..clear()..addAll(walks);
+        _sales..clear()..addAll(transactions.map((item) => _Sale(item.customer,
+          '${item.service} · ${item.sourceType}', item.amount,
+          TimeOfDay.fromDateTime(item.capturedAt).format(context), item.method,
+          createdAt: item.capturedAt, source: _saleSource(item.sourceType))));
+      });
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Dashboard refreshed from Supabase.')));
+    } catch (error) {
+      if (mounted) _showBackendError(error);
+    }
   }
 
   Future<void> _pickCustomSalesRange() async {
@@ -109,17 +227,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
   }
 
   List<_TransactionRow> _allSalesTransactions() {
-    final verifiedBookings = PaymentBookingStore.instance.bookings.where(
-      (booking) => booking.paymentStatus == PaymentStatus.verified,
-    );
-    return [
-      ..._sales.map(_TransactionRow.fromSale),
-      for (final booking in verifiedBookings) ...[
-        _TransactionRow.fromBooking(booking),
-        if (booking.balancePayment case final balance?)
-          _TransactionRow.fromBalancePayment(booking, balance),
-      ],
-    ];
+    return _sales.map(_TransactionRow.fromSale).toList();
   }
 
   List<_SalesBucket> _salesBuckets(List<_TransactionRow> transactions) {
@@ -255,6 +363,129 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     }
   }
 
+  Future<void> _pickCustomTherapistProfitRange() async {
+    final now = DateUtils.dateOnly(DateTime.now());
+    final initial = _customTherapistProfitRange ??
+        DateTimeRange(start: now.subtract(const Duration(days: 6)), end: now);
+    final range = await showDateRangePicker(
+      context: context,
+      firstDate: DateTime(now.year - 10),
+      lastDate: now,
+      initialDateRange: initial,
+    );
+    if (range != null && mounted) {
+      setState(() {
+        _customTherapistProfitRange = range;
+        _therapistProfitPeriod = _SalesPeriod.custom;
+      });
+    }
+  }
+
+  DateTimeRange? _therapistProfitDateRange() {
+    final today = DateUtils.dateOnly(DateTime.now());
+    switch (_therapistProfitPeriod) {
+      case _SalesPeriod.daily:
+        return DateTimeRange(
+          start: today.subtract(const Duration(days: 6)),
+          end: today.add(const Duration(days: 1)),
+        );
+      case _SalesPeriod.weekly:
+        final thisWeek = today.subtract(Duration(days: today.weekday - 1));
+        return DateTimeRange(
+          start: thisWeek.subtract(const Duration(days: 7 * 7)),
+          end: today.add(const Duration(days: 1)),
+        );
+      case _SalesPeriod.monthly:
+        return DateTimeRange(
+          start: DateTime(today.year, today.month - 11, 1),
+          end: today.add(const Duration(days: 1)),
+        );
+      case _SalesPeriod.yearly:
+        return DateTimeRange(
+          start: DateTime(today.year - 4, 1, 1),
+          end: today.add(const Duration(days: 1)),
+        );
+      case _SalesPeriod.custom:
+        final selected = _customTherapistProfitRange;
+        if (selected == null) return null;
+        return DateTimeRange(
+          start: DateUtils.dateOnly(selected.start),
+          end: DateUtils.dateOnly(selected.end).add(const Duration(days: 1)),
+        );
+    }
+  }
+
+  String _therapistProfitPeriodLabel() {
+    if (_therapistProfitPeriod != _SalesPeriod.custom) {
+      return switch (_therapistProfitPeriod) {
+        _SalesPeriod.daily => 'Daily - last 7 days',
+        _SalesPeriod.weekly => 'Weekly - last 8 weeks',
+        _SalesPeriod.monthly => 'Monthly - last 12 months',
+        _SalesPeriod.yearly => 'Yearly - last 5 years',
+        _SalesPeriod.custom => 'Custom range',
+      };
+    }
+    final range = _customTherapistProfitRange;
+    return range == null
+        ? 'Choose a custom date range'
+        : '${_shortDate(range.start)} - ${_shortDate(range.end)}';
+  }
+
+  List<_TherapistProfitGroup> _therapistProfitGroups(DateTimeRange range) {
+    final groups = <String, _TherapistProfitGroup>{};
+    bool inRange(DateTime date) =>
+        !date.isBefore(range.start) && date.isBefore(range.end);
+
+    void addRow(_TherapistProfitRow row) {
+      groups
+          .putIfAbsent(
+            row.therapistId,
+            () => _TherapistProfitGroup(
+              id: row.therapistId,
+              name: row.therapistName,
+            ),
+          )
+          .rows
+          .add(row);
+    }
+
+    for (final booking in PaymentBookingStore.instance.bookings.where(
+      (item) =>
+          _isReportableOnlineBooking(item) &&
+          inRange(item.serviceCompletedAt!),
+    )) {
+      addRow(_TherapistProfitRow(
+        therapistId: booking.therapistId,
+        therapistName: booking.therapistName,
+        clientName: booking.clientName,
+        serviceName: booking.serviceName,
+        completedAt: booking.serviceCompletedAt!,
+        amount: booking.totalAmount,
+        source: 'Online booking',
+      ));
+    }
+    for (final walkIn in _walkIns.where(
+      (item) => item.isServiceComplete && inRange(item.completedAt),
+    )) {
+      addRow(_TherapistProfitRow(
+        therapistId: walkIn.therapistId,
+        therapistName: walkIn.therapistName,
+        clientName: walkIn.customer,
+        serviceName: walkIn.service,
+        completedAt: walkIn.completedAt,
+        amount: walkIn.amount,
+        source: 'Walk-in',
+      ));
+    }
+
+    final result = groups.values.toList()
+      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    for (final group in result) {
+      group.rows.sort((a, b) => b.completedAt.compareTo(a.completedAt));
+    }
+    return result;
+  }
+
   List<_ReportRange> _serviceRanges() {
     final today = DateUtils.dateOnly(DateTime.now());
     _ReportRange range(DateTime start, DateTime end, String label) =>
@@ -349,8 +580,9 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       var onlineCount = 0;
       for (final walkIn in _walkIns.where(
         (item) =>
-            !item.createdAt.isBefore(range.start) &&
-            item.createdAt.isBefore(range.endExclusive),
+            item.isServiceComplete &&
+            !item.completedAt.isBefore(range.start) &&
+            item.completedAt.isBefore(range.endExclusive),
       )) {
         serviceCounts.update(
           walkIn.serviceId,
@@ -392,7 +624,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       (range) =>
           !date.isBefore(range.start) && date.isBefore(range.endExclusive),
     );
-    for (final walkIn in _walkIns.where((item) => inRange(item.createdAt))) {
+    for (final walkIn in _walkIns.where((item) => item.isServiceComplete && inRange(item.completedAt))) {
       final count = counts.putIfAbsent(
         walkIn.serviceId,
         () => _ServiceCount(
@@ -674,7 +906,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                         labelText: 'Therapist on duty now',
                         helperText: candidates.isEmpty
                             ? 'No therapist is assigned and available right now. Ask the admin to update today’s duty roster.'
-                            : 'Only therapists assigned today and available for this service are listed.',
+                            : 'Therapists assigned today and available now are listed.',
                       ),
                       items: candidates
                           .map(
@@ -704,12 +936,9 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                 child: const Text('Cancel'),
               ),
               FilledButton.icon(
-                onPressed: () {
+                onPressed: () async {
                   if (name.text.trim().isEmpty) return;
-                  final serviceStartedAt = DateTime.now();
-                  final currentTherapists = availableTherapists(
-                    serviceStartedAt,
-                  );
+                  final currentTherapists = availableTherapists(DateTime.now());
                   final selectedTherapists = currentTherapists
                       .where((item) => item.id == selectedTherapistId)
                       .toList(growable: false);
@@ -725,19 +954,17 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                     return;
                   }
                   final therapist = selectedTherapists.first;
-                  final walkIn = _WalkIn(
-                    customer: name.text.trim(),
-                    phone: phone.text.trim(),
-                    serviceId: service['id'] as String,
-                    service: service['name'] as String,
-                    therapistId: therapist.id,
-                    therapistName: therapist.name,
-                    durationMinutes: (service['durationMinutes'] as num)
-                        .toInt(),
-                    amount: (service['price'] as num).toDouble(),
-                    createdAt: serviceStartedAt,
-                  );
-                  setState(() => _walkIns.insert(0, walkIn));
+                  try {
+                    await _cashierRepository.startWalkIn(
+                      clientName: name.text,
+                      clientPhone: phone.text,
+                      serviceId: service['id'] as String,
+                      therapistId: therapist.id,
+                    );
+                  } catch (error) {
+                    if (mounted) _showBackendError(error);
+                    return;
+                  }
                   _walkInTicker ??= Timer.periodic(const Duration(seconds: 1), (
                     _,
                   ) {
@@ -910,7 +1137,9 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
         child: ListView(
           padding: const EdgeInsets.symmetric(horizontal: 10),
           children: [
-            for (final section in _AdminSection.values)
+            for (final section in _AdminSection.values.where(
+              (section) => _isAdmin || section != _AdminSection.clientChats,
+            ))
               ListTile(
                 leading: Icon(section.icon),
                 title: Text(section.label),
@@ -951,7 +1180,26 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     _AdminSection.checkout => _cashierPanel(),
     _AdminSection.salesReport => _salesPanel(),
     _AdminSection.serviceReport => _serviceReportPanel(),
+    _AdminSection.therapistProfit => _therapistProfitPanel(),
+    _AdminSection.clientChats => _adminClientChatsPanel(),
   };
+
+  Widget _adminClientChatsPanel() => _Panel(
+    title: 'Customer chats',
+    child: AdminClientChatsPanel(
+      conversations: _adminChatInbox,
+      loading: _adminChatLoading,
+      error: _adminChatError,
+      onRetry: _refreshAdminChatInbox,
+      onOpenConversation: (conversation) async {
+        await context.push(
+          '${AppRoutes.clientAdminChatThreadBase}/${conversation.id}',
+          extra: conversation.clientName,
+        );
+        await _refreshAdminChatInbox();
+      },
+    ),
+  );
 
   Widget _dashboardOverview() => Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1015,22 +1263,27 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                   color: AppTheme.secondary,
                 ),
               ),
-              SizedBox(
-                width: width,
-                child: const _MetricCard(
-                  label: 'Open chats',
-                  value: '0',
-                  detail: 'No chat service connected',
-                  icon: Icons.chat_bubble_outline,
-                  color: Color(0xFF7B4DBA),
+              if (_isAdmin)
+                SizedBox(
+                  width: width,
+                  child: _MetricCard(
+                    label: 'Open chats',
+                    value: _unreadAdminConversations.toString(),
+                    detail: 'Conversations with unread client messages',
+                    icon: Icons.chat_bubble_outline,
+                    color: const Color(0xFF7B4DBA),
+                    onTap: () => _selectAdminSection(
+                      _AdminSection.clientChats,
+                      inDrawer: false,
+                    ),
+                  ),
                 ),
-              ),
             ],
           );
         },
       ),
       const SizedBox(height: 20),
-      _chatPanel(),
+      if (_isAdmin) _chatPanel(),
     ],
   );
   Widget _salesPanel() => _Panel(
@@ -1289,6 +1542,124 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     },
   );
 
+  Widget _therapistProfitPanel() => AnimatedBuilder(
+    animation: PaymentBookingStore.instance,
+    builder: (context, _) {
+      final range = _therapistProfitDateRange();
+      final groups = range == null ? <_TherapistProfitGroup>[] : _therapistProfitGroups(range);
+      final rows = groups.expand((group) => group.rows).toList();
+      final total = rows.fold<double>(0, (sum, row) => sum + row.amount);
+      final periodLabel = _therapistProfitPeriodLabel();
+      return _Panel(
+        title: 'Therapist profit',
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final period in _SalesPeriod.values)
+                  ChoiceChip(
+                    label: Text(period.label),
+                    selected: _therapistProfitPeriod == period,
+                    onSelected: (_) {
+                      if (period == _SalesPeriod.custom) {
+                        _pickCustomTherapistProfitRange();
+                      } else {
+                        setState(() => _therapistProfitPeriod = period);
+                      }
+                    },
+                  ),
+              ],
+            ),
+            if (_therapistProfitPeriod == _SalesPeriod.custom)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  onPressed: _pickCustomTherapistProfitRange,
+                  icon: const Icon(Icons.date_range_outlined),
+                  label: Text(periodLabel),
+                ),
+              ),
+            const SizedBox(height: 8),
+            const Text(
+              'Shows full service prices for completed online bookings and walk-ins. This is service revenue, before clinic costs or commissions.',
+              style: TextStyle(
+                fontSize: 12,
+                color: AppTheme.onSurfaceVariantLight,
+              ),
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 10,
+              runSpacing: 8,
+              children: [
+                Chip(label: Text('Therapists: ${groups.length}')),
+                Chip(label: Text('Completed services: ${rows.length}')),
+                Chip(label: Text('Service value: PHP ${total.toStringAsFixed(2)}')),
+              ],
+            ),
+            const SizedBox(height: 10),
+            if (range == null)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 30),
+                child: Center(child: Text('Choose a date range to view therapist service totals.')),
+              )
+            else if (groups.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 38),
+                child: Center(child: Text('No completed services recorded for this period.')),
+              )
+            else
+              for (final group in groups)
+                Card(
+                  margin: const EdgeInsets.only(bottom: 10),
+                  elevation: 0,
+                  color: AppTheme.surfaceVariantLight,
+                  child: ExpansionTile(
+                    tilePadding: const EdgeInsets.symmetric(horizontal: 14),
+                    childrenPadding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
+                    title: Text(
+                      group.name,
+                      style: const TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                    subtitle: Text('${group.rows.length} completed service${group.rows.length == 1 ? '' : 's'}'),
+                    trailing: Text(
+                      'PHP ${group.total.toStringAsFixed(2)}',
+                      style: const TextStyle(
+                        color: AppTheme.primary,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    children: [
+                      for (final row in group.rows)
+                        ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          dense: true,
+                          leading: const CircleAvatar(
+                            radius: 17,
+                            backgroundColor: Colors.white,
+                            child: Icon(Icons.person_outline, size: 18, color: AppTheme.primary),
+                          ),
+                          title: Text(row.clientName),
+                          subtitle: Text(
+                            '${row.serviceName} · ${row.source} · ${_shortDate(row.completedAt)} ${TimeOfDay.fromDateTime(row.completedAt).format(context)}',
+                          ),
+                          trailing: Text(
+                            'PHP ${row.amount.toStringAsFixed(2)}',
+                            style: const TextStyle(fontWeight: FontWeight.w700),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+          ],
+        ),
+      );
+    },
+  );
+
   Widget _transactionTile(_TransactionRow transaction) => Padding(
     padding: const EdgeInsets.symmetric(vertical: 7),
     child: Row(
@@ -1333,11 +1704,17 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
 
   Widget _chatPanel() => _Panel(
     title: 'Customer chats',
-    child: const Padding(
-      padding: EdgeInsets.symmetric(vertical: 20),
-      child: Center(
-        child: Text('Chat records will appear when chat is connected.'),
+    trailing: TextButton(
+      onPressed: () => _selectAdminSection(
+        _AdminSection.clientChats,
+        inDrawer: false,
       ),
+      child: const Text('Open inbox'),
+    ),
+    child: Text(
+      _adminChatInbox.isEmpty
+          ? 'No client conversations yet.'
+          : '$_unreadAdminConversations conversations have unread client messages.',
     ),
   );
 
@@ -1346,13 +1723,21 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     final booking = await showDialog<Booking>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          title: const Text('Find completed booking'),
-          content: SizedBox(
-            width: 500,
-            height: 420,
-            child: Column(
-              children: [
+        builder: (context, setDialogState) {
+          final availableHeight =
+              MediaQuery.sizeOf(context).height -
+              MediaQuery.viewInsetsOf(context).bottom;
+          final contentHeight = (availableHeight - 240)
+              .clamp(160.0, 420.0)
+              .toDouble();
+          return AlertDialog(
+            title: const Text('Find booking with balance due'),
+            content: SizedBox(
+              width: 500,
+              height: contentHeight,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
                 TextField(
                   controller: searchController,
                   autofocus: true,
@@ -1365,7 +1750,8 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                   ),
                 ),
                 const SizedBox(height: 12),
-                Expanded(
+                SizedBox(
+                  height: contentHeight - 68,
                   child: AnimatedBuilder(
                     animation: PaymentBookingStore.instance,
                     builder: (context, _) {
@@ -1375,8 +1761,12 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                             (booking) =>
                                 booking.paymentStatus ==
                                     PaymentStatus.verified &&
-                                booking.bookingStatus ==
-                                    BookingStatus.completed &&
+                                (booking.bookingStatus ==
+                                        BookingStatus.checkedIn ||
+                                    booking.bookingStatus ==
+                                        BookingStatus.inProgress ||
+                                    booking.bookingStatus ==
+                                        BookingStatus.completed) &&
                                 booking.balancePayment == null &&
                                 booking.remainingBalance > 0,
                           )
@@ -1403,7 +1793,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                       if (bookings.isEmpty) {
                         return const Center(
                           child: Text(
-                            'No completed bookings with a balance due were found.',
+                            'No checked-in bookings with an unpaid balance were found.',
                             textAlign: TextAlign.center,
                           ),
                         );
@@ -1433,16 +1823,17 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                     },
                   ),
                 ),
-              ],
+                ],
             ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext),
-              child: const Text('Cancel'),
             ),
-          ],
-        ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext),
+                child: const Text('Cancel'),
+              ),
+            ],
+          );
+        },
       ),
     );
     searchController.dispose();
@@ -1505,11 +1896,11 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     );
     if (shouldCollect != true || !mounted) return;
 
-    final collected = PaymentBookingStore.instance.collectBalance(
+    final collected = await PaymentBookingStore.instance.collectBalance(
       booking.id,
       amount: booking.remainingBalance,
       method: method,
-      cashierId: 'cashier-session',
+      cashierId: AuthSessionStore.instance.profile?.id ?? 'staff',
     );
     if (!collected) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1544,7 +1935,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
-              'Start walk-in services, check out completed visits, or collect appointment balances.',
+              'Start walk-in services, check out visits, or collect online booking balances after check-in.',
               style: TextStyle(color: AppTheme.onSurfaceVariantLight),
             ),
             const SizedBox(height: 14),
@@ -1641,7 +2032,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       );
       return;
     }
-    final selected = await showDialog<_WalkIn>(
+    final selected = await showDialog<WalkIn>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('Checkout walk-in'),
@@ -1676,7 +2067,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     if (selected != null && mounted) _checkoutWalkIn(selected);
   }
 
-  Future<void> _checkoutWalkIn(_WalkIn walkIn) async {
+  Future<void> _checkoutWalkIn(WalkIn walkIn) async {
     if (walkIn.paymentCollected) return;
     var method = 'Cash';
     final confirmed = await showDialog<bool>(
@@ -1720,20 +2111,12 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       ),
     );
     if (confirmed != true || !mounted) return;
-    setState(() {
-      walkIn.paymentCollected = true;
-      walkIn.paymentMethod = method;
-      _sales.insert(
-        0,
-        _Sale(
-          walkIn.customer,
-          '${walkIn.service} · ${walkIn.durationMinutes} min',
-          walkIn.amount,
-          TimeOfDay.now().format(context),
-          method,
-        ),
-      );
-    });
+    try {
+      await _cashierRepository.checkoutWalkIn(walkIn.id, method: method);
+    } catch (error) {
+      _showBackendError(error);
+      return;
+    }
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text('Payment collected. ${walkIn.customer} checked out.'),
@@ -1945,6 +2328,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                   width: 180,
                   child: DropdownButtonFormField<BookingStatus?>(
                     initialValue: _bookingStatusFilter,
+                    isExpanded: true,
                     decoration: const InputDecoration(
                       labelText: 'Booking status',
                       isDense: true,
@@ -1953,12 +2337,20 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                     items: [
                       const DropdownMenuItem<BookingStatus?>(
                         value: null,
-                        child: Text('All booking statuses'),
+                        child: Text(
+                          'All booking statuses',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
                       ),
                       ...BookingStatus.values.map(
                         (status) => DropdownMenuItem(
                           value: status,
-                          child: Text(status.label),
+                          child: Text(
+                            status.label,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
                         ),
                       ),
                     ],
@@ -1970,6 +2362,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                   width: 190,
                   child: DropdownButtonFormField<PaymentStatus?>(
                     initialValue: _paymentStatusFilter,
+                    isExpanded: true,
                     decoration: const InputDecoration(
                       labelText: 'Payment status',
                       isDense: true,
@@ -1978,12 +2371,20 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                     items: [
                       const DropdownMenuItem<PaymentStatus?>(
                         value: null,
-                        child: Text('All payment statuses'),
+                        child: Text(
+                          'All payment statuses',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
                       ),
                       ...PaymentStatus.values.map(
                         (status) => DropdownMenuItem(
                           value: status,
-                          child: Text(status.label),
+                          child: Text(
+                            status.label,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
                         ),
                       ),
                     ],
@@ -2004,6 +2405,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                   width: 175,
                   child: DropdownButtonFormField<_BookingSort>(
                     initialValue: _bookingSort,
+                    isExpanded: true,
                     decoration: const InputDecoration(
                       labelText: 'Sort by',
                       isDense: true,
@@ -2012,15 +2414,27 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                     items: const [
                       DropdownMenuItem(
                         value: _BookingSort.appointmentTime,
-                        child: Text('Appointment time'),
+                        child: Text(
+                          'Appointment time',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
                       ),
                       DropdownMenuItem(
                         value: _BookingSort.newest,
-                        child: Text('Newest booking'),
+                        child: Text(
+                          'Newest booking',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
                       ),
                       DropdownMenuItem(
                         value: _BookingSort.status,
-                        child: Text('Status'),
+                        child: Text(
+                          'Status',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
                       ),
                     ],
                     onChanged: (value) => setState(
@@ -2343,7 +2757,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       ),
     );
     if (accepted != true || !mounted) return;
-    final updated = PaymentBookingStore.instance.transitionBooking(
+    final updated = await PaymentBookingStore.instance.transitionBooking(
       booking.id,
       next: next,
       adminId: 'demo-admin',
@@ -2397,7 +2811,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     );
     controller.dispose();
     if (reason == null || !mounted) return;
-    final updated = PaymentBookingStore.instance.transitionBooking(
+    final updated = await PaymentBookingStore.instance.transitionBooking(
       booking.id,
       next: BookingStatus.cancelled,
       adminId: 'demo-admin',
@@ -2768,7 +3182,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     );
     if (decision == null || !mounted) return;
     if (decision) {
-      final updated = PaymentBookingStore.instance.verifyPayment(
+      final updated = await PaymentBookingStore.instance.verifyPayment(
         booking.id,
         adminId: 'demo-admin',
       );
@@ -2776,7 +3190,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              '30% down payment verified. Booking ${booking.referenceNumber} remains ${booking.bookingStatus.label}.',
+              '30% down payment verified. Booking ${booking.referenceNumber} is confirmed.',
             ),
           ),
         );
@@ -2794,7 +3208,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
 
     final reason = await _askRejectionReason();
     if (reason == null || !mounted) return;
-    final rejected = PaymentBookingStore.instance.rejectPayment(
+    final rejected = await PaymentBookingStore.instance.rejectPayment(
       booking.id,
       adminId: 'demo-admin',
       reason: reason,
@@ -2865,43 +3279,49 @@ class _MetricCard extends StatelessWidget {
   final String label, value, detail;
   final IconData icon;
   final Color color;
+  final VoidCallback? onTap;
   const _MetricCard({
     required this.label,
     required this.value,
     required this.detail,
     required this.icon,
     required this.color,
+    this.onTap,
   });
   @override
   Widget build(BuildContext context) => _Panel(
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(
-              label,
-              style: const TextStyle(color: AppTheme.onSurfaceVariantLight),
-            ),
-            Icon(icon, color: color),
-          ],
-        ),
-        const SizedBox(height: 10),
-        Text(
-          value,
-          style: Theme.of(context).textTheme.headlineSmall
-              ?.copyWith(fontWeight: FontWeight.w800),
-        ),
-        const SizedBox(height: 5),
-        Text(
-          detail,
-          style: const TextStyle(
-            fontSize: 11,
-            color: AppTheme.onSurfaceVariantLight,
+    child: InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                label,
+                style: const TextStyle(color: AppTheme.onSurfaceVariantLight),
+              ),
+              Icon(icon, color: color),
+            ],
           ),
-        ),
-      ],
+          const SizedBox(height: 10),
+          Text(
+            value,
+            style: Theme.of(context).textTheme.headlineSmall
+                ?.copyWith(fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 5),
+          Text(
+            detail,
+            style: const TextStyle(
+              fontSize: 11,
+              color: AppTheme.onSurfaceVariantLight,
+            ),
+          ),
+        ],
+      ),
     ),
   );
 }
@@ -2915,7 +3335,9 @@ enum _AdminSection {
   walkIns('Walk-ins', Icons.directions_walk),
   checkout('Checkout', Icons.point_of_sale),
   salesReport('Sales Report', Icons.bar_chart_outlined),
-  serviceReport('Service Report', Icons.spa_outlined);
+  serviceReport('Service Report', Icons.spa_outlined),
+  therapistProfit('Therapist Profit', Icons.account_balance_wallet_outlined),
+  clientChats('Customer Chats', Icons.chat_bubble_outline_rounded);
 
   const _AdminSection(this.label, this.icon);
 
@@ -3130,6 +3552,36 @@ class _ServiceCount {
   int walkIns = 0;
   int onlineBookings = 0;
   int get total => walkIns + onlineBookings;
+}
+
+class _TherapistProfitGroup {
+  _TherapistProfitGroup({required this.id, required this.name});
+
+  final String id;
+  final String name;
+  final List<_TherapistProfitRow> rows = [];
+
+  double get total => rows.fold<double>(0, (sum, row) => sum + row.amount);
+}
+
+class _TherapistProfitRow {
+  const _TherapistProfitRow({
+    required this.therapistId,
+    required this.therapistName,
+    required this.clientName,
+    required this.serviceName,
+    required this.completedAt,
+    required this.amount,
+    required this.source,
+  });
+
+  final String therapistId;
+  final String therapistName;
+  final String clientName;
+  final String serviceName;
+  final DateTime completedAt;
+  final double amount;
+  final String source;
 }
 
 const _serviceColorValues = <int>[
@@ -3482,68 +3934,14 @@ class _TimerPill extends StatelessWidget {
 }
 
 class _Sale {
-  final String customer, service, time, method;
+  final String customer, service, time, method, source;
   final double amount;
   final DateTime createdAt;
-  _Sale(this.customer, this.service, this.amount, this.time, this.method)
-    : createdAt = DateTime.now();
+  _Sale(this.customer, this.service, this.amount, this.time, this.method, {DateTime? createdAt, this.source = 'Walk-in checkout'})
+    : createdAt = createdAt ?? DateTime.now();
 }
 
-class _WalkIn {
-  _WalkIn({
-    required this.customer,
-    required this.phone,
-    required this.serviceId,
-    required this.service,
-    required this.therapistId,
-    required this.therapistName,
-    required this.durationMinutes,
-    required this.amount,
-    required this.createdAt,
-  });
-
-  static const preparationAllowance = Duration(minutes: 5);
-
-  final String customer;
-  final String phone;
-  final String serviceId;
-  final String service;
-  final String therapistId;
-  final String therapistName;
-  final int durationMinutes;
-  final double amount;
-  final DateTime createdAt;
-  bool paymentCollected = false;
-  String? paymentMethod;
-
-  Duration get elapsed => DateTime.now().difference(createdAt);
-  Duration get preparationAndServiceDuration =>
-      preparationAllowance + Duration(minutes: durationMinutes);
-  bool get isServiceComplete => elapsed >= preparationAndServiceDuration;
-
-  String get statusLabel {
-    if (isServiceComplete && paymentCollected) return 'Completed · Paid';
-    if (isServiceComplete) return 'Service complete · Awaiting payment';
-    if (paymentCollected) {
-      return 'Paid · ${_formatDuration(preparationAndServiceDuration - elapsed)} left';
-    }
-    if (elapsed < preparationAllowance) {
-      return 'Preparing · ${_formatDuration(preparationAllowance - elapsed)}';
-    }
-    return 'In progress · ${_formatDuration(preparationAndServiceDuration - elapsed)} left';
-  }
-
-  String get remainingLabel => isServiceComplete
-      ? 'Ready for checkout'
-      : _formatDuration(preparationAndServiceDuration - elapsed);
-
-  static String _formatDuration(Duration duration) {
-    final seconds = duration.inSeconds.clamp(0, 999999);
-    final minutes = seconds ~/ 60;
-    final remainingSeconds = seconds % 60;
-    return '${minutes.toString().padLeft(2, '0')}:${remainingSeconds.toString().padLeft(2, '0')}';
-  }
-}
+typedef _WalkIn = WalkIn;
 
 class _TransactionRow {
   final String customer, service, time, method, source;
@@ -3565,7 +3963,7 @@ class _TransactionRow {
     service: sale.service,
     time: sale.time,
     method: sale.method,
-    source: 'Walk-in checkout',
+    source: sale.source,
     amount: sale.amount,
     createdAt: sale.createdAt,
   );

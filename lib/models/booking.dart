@@ -40,6 +40,7 @@ class BookingActivity {
 
 class PaymentProofSubmission {
   PaymentProofSubmission({
+    this.id,
     required this.transactionReference,
     required this.amount,
     required this.screenshot,
@@ -49,6 +50,7 @@ class PaymentProofSubmission {
     this.reviewedBy,
   });
 
+  final String? id;
   final String transactionReference;
   final double amount;
   final Uint8List screenshot;

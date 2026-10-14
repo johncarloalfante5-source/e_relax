@@ -2,8 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 
-import '../../data/payment_booking_store.dart';
 import '../../data/therapist_roster_store.dart';
+import '../../data/stores/auth_session_store.dart';
+import '../../data/payment_booking_store.dart';
+import '../../models/profile.dart';
 import '../../routes/app_routes.dart';
 import '../../theme/app_theme.dart';
 import './widget/auth_form_widget.dart';
@@ -18,7 +20,6 @@ class SignUpLoginScreen extends StatefulWidget {
 
 class _SignUpLoginScreenState extends State<SignUpLoginScreen>
     with TickerProviderStateMixin {
-  // TODO: Replace with [Riverpod/Bloc] for production auth state
   bool _isLogin = true;
   bool _isLoading = false;
   late AnimationController _fadeController;
@@ -51,31 +52,52 @@ class _SignUpLoginScreenState extends State<SignUpLoginScreen>
     });
   }
 
-  void _onSubmit(Map<String, String> formData) {
-    // TODO: Replace with Firebase Authentication for production
+  Future<void> _onSubmit(Map<String, String> formData) async {
     setState(() => _isLoading = true);
-
-    Future.delayed(const Duration(milliseconds: 1200), () {
-      if (!mounted) return;
-      setState(() => _isLoading = false);
-
-      // Prototype-only route selection; this is not real authentication.
-      final email = formData['email'] ?? '';
-      if (email.contains('admin')) {
-        context.go(AppRoutes.adminDashboard);
-      } else if (TherapistRosterStore.instance.findByEmail(email) != null ||
-          email.contains('therapist')) {
-        context.go(AppRoutes.therapistDashboard, extra: email.trim());
-      } else if (email.contains('cashier')) {
-        context.go(AppRoutes.adminDashboard);
-      } else {
-        ClientSession.instance.signIn(
-          email: email,
-          displayName: formData['name'],
+    try {
+      final session = AuthSessionStore.instance;
+      if (_isLogin) {
+        final profile = await session.signIn(
+          email: formData['email'] ?? '',
+          password: formData['password'] ?? '',
         );
-        context.go(AppRoutes.clientDashboard);
+        await PaymentBookingStore.instance.initialize();
+        await TherapistRosterStore.instance.initialize();
+        ClientSession.instance.signIn(
+          email: profile.email,
+          displayName: profile.displayName,
+          clientId: profile.id,
+        );
+        if (mounted) {
+          final destination = switch (profile.role) {
+            AppRole.client => AppRoutes.clientDashboard,
+            AppRole.admin || AppRole.cashier => AppRoutes.adminDashboard,
+            AppRole.therapist => AppRoutes.therapistDashboard,
+          };
+          context.go(destination, extra: profile.email);
+        }
+      } else {
+        await session.signUpClient(
+          email: formData['email'] ?? '',
+          password: formData['password'] ?? '',
+          displayName: formData['name'] ?? '',
+        );
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Account created. Check your email to confirm it, then sign in.')),
+          );
+          setState(() => _isLogin = true);
+        }
       }
-    });
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Authentication failed: $error')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
   }
 
   @override
@@ -136,6 +158,7 @@ class _SignUpLoginScreenState extends State<SignUpLoginScreen>
             isLoading: _isLoading,
             onSubmit: _onSubmit,
             onToggleMode: _toggleMode,
+            onResetPassword: (email) => AuthSessionStore.instance.resetPassword(email),
           ),
           const SizedBox(height: 16),
         ],

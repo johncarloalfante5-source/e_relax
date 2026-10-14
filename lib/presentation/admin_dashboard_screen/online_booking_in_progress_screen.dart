@@ -103,7 +103,7 @@ class _OnlineBookingCard extends StatelessWidget {
     );
     if (accepted != true || !context.mounted) return;
 
-    final updated = PaymentBookingStore.instance.transitionBooking(
+    final updated = await PaymentBookingStore.instance.transitionBooking(
       booking.id,
       next: next,
       adminId: 'demo-admin',
