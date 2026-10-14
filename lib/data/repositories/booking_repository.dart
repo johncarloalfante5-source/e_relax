@@ -11,5 +11,6 @@ abstract interface class BookingRepository {
   Future<void> rejectPayment(String submissionId, {required String reason});
   Future<void> resubmitProof(String bookingId, {required String reference, required Uint8List proof});
   Future<void> transition(String bookingId, BookingStatus next, {String? reason});
+  Future<void> cancelClientBooking(String bookingId);
   Future<void> markNotificationRead(String notificationId);
 }

@@ -73,6 +73,7 @@ enum ClientNoticeType {
   paymentRejected,
   proofResubmitted,
   bookingConfirmed,
+  bookingCancelled,
   balanceCollected,
 }
 
@@ -154,6 +155,7 @@ class PaymentBookingStore extends ChangeNotifier {
             : key.startsWith('payment_rejected') ? ClientNoticeType.paymentRejected
             : key.startsWith('proof_resubmitted') ? ClientNoticeType.proofResubmitted
             : key.startsWith('balance_collected') ? ClientNoticeType.balanceCollected
+            : key.startsWith('booking_cancelled') ? ClientNoticeType.bookingCancelled
             : ClientNoticeType.bookingConfirmed;
         final notice = ClientPaymentNotice(id: row['id'] as String,
           clientId: row['user_id'] as String, bookingId: row['booking_id'] as String? ?? '',
@@ -384,6 +386,44 @@ class PaymentBookingStore extends ChangeNotifier {
       await refresh();
       return true;
     } catch (error) { _loadError = error.toString(); notifyListeners(); return false; }
+  }
+
+  Future<bool> cancelClientBooking(String bookingId) async {
+    final booking = findById(bookingId);
+    if (booking == null ||
+        booking.bookingStatus != BookingStatus.confirmed ||
+        booking.paymentStatus != PaymentStatus.verified) {
+      return false;
+    }
+
+    try {
+      await _repository.cancelClientBooking(bookingId);
+    } catch (error) {
+      _loadError = error.toString();
+      notifyListeners();
+      return false;
+    }
+
+    booking.bookingStatus = BookingStatus.cancelled;
+    booking.cancellationReason =
+        'Cancelled by client. Down payment is non-refundable; no refund issued.';
+    booking.updatedAt = DateTime.now().toUtc();
+    _audit(
+      booking,
+      BookingActivityType.bookingCancelled,
+      ClientSession.instance.clientName,
+      booking.cancellationReason,
+    );
+    notifyListeners();
+
+    try {
+      await refresh();
+    } catch (error) {
+      // The server already confirmed cancellation; keep that state visible.
+      _loadError = error.toString();
+      notifyListeners();
+    }
+    return true;
   }
 
   void _audit(

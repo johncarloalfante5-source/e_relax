@@ -59,7 +59,8 @@ class _UpcomingBookingWidgetState extends State<UpcomingBookingWidget> {
               margin: const EdgeInsets.only(top: 10),
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: notice.type == ClientNoticeType.paymentRejected
+                color: notice.type == ClientNoticeType.paymentRejected ||
+                        notice.type == ClientNoticeType.bookingCancelled
                     ? const Color(0xFFFFEBEE)
                     : AppTheme.primaryContainer,
                 borderRadius: BorderRadius.circular(12),
@@ -67,7 +68,8 @@ class _UpcomingBookingWidgetState extends State<UpcomingBookingWidget> {
               child: Text(
                 notice.message,
                 style: TextStyle(
-                  color: notice.type == ClientNoticeType.paymentRejected
+                  color: notice.type == ClientNoticeType.paymentRejected ||
+                          notice.type == ClientNoticeType.bookingCancelled
                       ? AppTheme.error
                       : AppTheme.primary,
                   fontSize: 12,
@@ -166,6 +168,19 @@ class _BookingCard extends StatelessWidget {
               badges.StatusBadgeWidget.fromPaymentStatus(paymentBadge),
             ],
           ),
+          if (booking.bookingStatus == BookingStatus.pendingPayment)
+            _cancellationNotice(
+              icon: Icons.info_outline_rounded,
+              message:
+                  'Cancellation is available after your down payment is verified.',
+            ),
+          if (booking.bookingStatus == BookingStatus.confirmed &&
+              booking.paymentStatus == PaymentStatus.verified)
+            _cancellationNotice(
+              icon: Icons.warning_amber_rounded,
+              message:
+                  'The 30% down payment is non-refundable if you cancel.',
+            ),
           const SizedBox(height: 12),
           _line('Booking ref.', booking.referenceNumber),
           _line('Clinic', 'E-Relax Massage Clinic'),
@@ -218,6 +233,16 @@ class _BookingCard extends StatelessWidget {
                 icon: const Icon(Icons.picture_as_pdf_outlined, size: 17),
                 label: const Text('Download receipt'),
               ),
+              if (booking.bookingStatus == BookingStatus.confirmed &&
+                  booking.paymentStatus == PaymentStatus.verified)
+                OutlinedButton.icon(
+                  onPressed: () => _cancelBooking(context),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppTheme.error,
+                  ),
+                  icon: const Icon(Icons.cancel_outlined, size: 17),
+                  label: const Text('Cancel booking'),
+                ),
               if (booking.paymentStatus == PaymentStatus.rejected)
                 FilledButton.icon(
                   onPressed: () => _resubmit(context),
@@ -259,6 +284,73 @@ class _BookingCard extends StatelessWidget {
       ],
     ),
   );
+
+  Widget _cancellationNotice({
+    required IconData icon,
+    required String message,
+  }) =>
+      Container(
+        width: double.infinity,
+        margin: const EdgeInsets.only(top: 10),
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: const Color(0xFFFFF4E5),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(icon, color: AppTheme.warning, size: 18),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                message,
+                style: const TextStyle(fontSize: 12, color: Colors.black87),
+              ),
+            ),
+          ],
+        ),
+      );
+
+  Future<void> _cancelBooking(BuildContext context) async {
+    final shouldCancel = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Cancel booking?'),
+        content: Text(
+          'You can cancel before check-in. The 30% down payment '
+          '(PHP ${booking.requiredDownPayment.toStringAsFixed(2)}) is '
+          'non-refundable. No refund will be issued.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Keep booking'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: AppTheme.error),
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Cancel booking'),
+          ),
+        ],
+      ),
+    );
+    if (shouldCancel != true || !context.mounted) return;
+
+    final cancelled = await PaymentBookingStore.instance.cancelClientBooking(
+      booking.id,
+    );
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          cancelled
+              ? 'Booking cancelled. No refund was issued.'
+              : 'Could not cancel booking. It may have already been checked in.',
+        ),
+      ),
+    );
+  }
 
   Future<void> _resubmit(BuildContext context) async {
     final controller = TextEditingController(

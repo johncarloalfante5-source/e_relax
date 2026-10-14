@@ -118,6 +118,7 @@ class ClientNotificationsScreen extends StatelessWidget {
     ClientNoticeType.paymentRejected => 'Payment proof needs attention',
     ClientNoticeType.proofResubmitted => 'Proof submitted',
     ClientNoticeType.bookingConfirmed => 'Booking confirmed',
+    ClientNoticeType.bookingCancelled => 'Booking cancelled',
     ClientNoticeType.balanceCollected => 'Balance paid',
   };
 
@@ -126,11 +127,15 @@ class ClientNotificationsScreen extends StatelessWidget {
     ClientNoticeType.paymentRejected => Icons.warning_amber_rounded,
     ClientNoticeType.proofResubmitted => Icons.upload_file_rounded,
     ClientNoticeType.bookingConfirmed => Icons.event_available_outlined,
+    ClientNoticeType.bookingCancelled => Icons.cancel_outlined,
     ClientNoticeType.balanceCollected => Icons.receipt_long_outlined,
   };
 
   static Color _noticeColor(ClientNoticeType type) =>
-      type == ClientNoticeType.paymentRejected ? AppTheme.error : AppTheme.primary;
+      type == ClientNoticeType.paymentRejected ||
+          type == ClientNoticeType.bookingCancelled
+      ? AppTheme.error
+      : AppTheme.primary;
 
   static String _formatDate(DateTime date) =>
       '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}  ${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}';

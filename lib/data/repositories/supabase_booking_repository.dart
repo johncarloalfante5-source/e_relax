@@ -172,6 +172,13 @@ class SupabaseBookingRepository implements BookingRepository {
 
   @override
   Future<void> transition(String bookingId, BookingStatus next, {String? reason}) => _client.rpc('transition_booking', params: {'p_booking_id': bookingId, 'p_status': next.name, 'p_reason': reason});
+
+  @override
+  Future<void> cancelClientBooking(String bookingId) => _client.rpc(
+    'cancel_client_booking',
+    params: {'p_booking_id': bookingId},
+  );
+
   @override
   Future<void> markNotificationRead(String notificationId) => _client.rpc('mark_notification_read', params: {'p_notification_id': notificationId});
 
