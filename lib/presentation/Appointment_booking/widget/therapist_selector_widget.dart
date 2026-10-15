@@ -8,6 +8,8 @@ import '../../../data/therapist_roster_store.dart';
 import '../../../theme/app_theme.dart';
 
 class TherapistSelectorWidget extends StatefulWidget {
+  static const anyTherapistId = '__any_therapist__';
+
   final String? selectedTherapistId;
   final void Function(String) onTherapistSelected;
   final DateTime? selectedDate;
@@ -203,9 +205,89 @@ class _TherapistSelectorWidgetState extends State<TherapistSelectorWidget> {
             height: 110,
             child: ListView.separated(
               scrollDirection: Axis.horizontal,
-              itemCount: assigned.length,
+              itemCount: assigned.length + 1,
               separatorBuilder: (_, __) => const SizedBox(width: 12),
               itemBuilder: (context, index) {
+                if (index == 0) {
+                  final isAvailable = availableIds.isNotEmpty &&
+                      _availabilityError == null;
+                  final isSelected =
+                      widget.selectedTherapistId ==
+                          TherapistSelectorWidget.anyTherapistId &&
+                      isAvailable;
+                  return GestureDetector(
+                    onTap: isAvailable
+                        ? () => widget.onTherapistSelected(
+                            TherapistSelectorWidget.anyTherapistId,
+                          )
+                        : null,
+                    child: Column(
+                      children: [
+                        AnimatedContainer(
+                          duration: const Duration(milliseconds: 200),
+                          curve: Curves.easeOutCubic,
+                          width: 68,
+                          height: 68,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: isSelected
+                                  ? AppTheme.secondary
+                                  : isAvailable
+                                  ? AppTheme.primary.withAlpha(51)
+                                  : AppTheme.onSurfaceVariantLight.withAlpha(90),
+                              width: isSelected ? 3 : 2,
+                            ),
+                            boxShadow: isSelected
+                                ? [
+                                    BoxShadow(
+                                      color: AppTheme.secondary.withAlpha(102),
+                                      blurRadius: 12,
+                                      offset: const Offset(0, 4),
+                                    ),
+                                  ]
+                                : [],
+                          ),
+                          child: ClipOval(
+                            child: ColoredBox(
+                              color: isAvailable
+                                  ? AppTheme.primaryContainer
+                                  : AppTheme.surfaceVariantLight,
+                              child: Icon(
+                                Icons.auto_awesome,
+                                color: isAvailable
+                                    ? AppTheme.primary
+                                    : AppTheme.onSurfaceVariantLight,
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          'Any therapist',
+                          style: GoogleFonts.plusJakartaSans(
+                            fontSize: 12,
+                            fontWeight: isSelected
+                                ? FontWeight.w700
+                                : FontWeight.w500,
+                            color: isAvailable
+                                ? (isSelected
+                                      ? AppTheme.primary
+                                      : AppTheme.onSurfaceLight)
+                                : AppTheme.onSurfaceVariantLight,
+                          ),
+                        ),
+                        Text(
+                          isAvailable ? 'Auto assign' : 'Unavailable',
+                          style: GoogleFonts.plusJakartaSans(
+                            fontSize: 10,
+                            color: AppTheme.onSurfaceVariantLight,
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }
                 final therapist = assigned[index];
                 final isAvailable = availableIds.contains(therapist.id) &&
                     _availabilityError == null;

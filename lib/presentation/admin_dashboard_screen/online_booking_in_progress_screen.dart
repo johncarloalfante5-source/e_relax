@@ -166,7 +166,9 @@ class _OnlineBookingCard extends StatelessWidget {
                 ),
                 _Detail(
                   icon: Icons.schedule_outlined,
-                  text: '${booking.durationMinutes} min service + 5 min prep',
+                  text: booking.preparationSkippedAt == null
+                      ? '${booking.durationMinutes} min service + 5 min prep'
+                      : '${booking.durationMinutes} min service · prep skipped',
                 ),
                 _Detail(
                   icon: Icons.payments_outlined,
@@ -179,22 +181,28 @@ class _OnlineBookingCard extends StatelessWidget {
               const SizedBox(height: 16),
               _ServiceClock(
                 startedAt: booking.serviceStartedAt,
+                preparationSkippedAt: booking.preparationSkippedAt,
                 durationMinutes: booking.durationMinutes,
               ),
             ],
             const SizedBox(height: 14),
-            Align(
-              alignment: Alignment.centerRight,
-              child: FilledButton.icon(
-                onPressed: () => _advance(
-                  context,
-                  started ? BookingStatus.completed : BookingStatus.inProgress,
+            Wrap(
+              alignment: WrapAlignment.end,
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                if (started) _SkipPreparationButton(booking: booking),
+                FilledButton.icon(
+                  onPressed: () => _advance(
+                    context,
+                    started ? BookingStatus.completed : BookingStatus.inProgress,
+                  ),
+                  icon: Icon(
+                    started ? Icons.task_alt_rounded : Icons.play_arrow_rounded,
+                  ),
+                  label: Text(started ? 'Complete service' : 'Start service'),
                 ),
-                icon: Icon(
-                  started ? Icons.task_alt_rounded : Icons.play_arrow_rounded,
-                ),
-                label: Text(started ? 'Complete service' : 'Start service'),
-              ),
+              ],
             ),
           ],
         ),
@@ -207,9 +215,14 @@ class _OnlineBookingCard extends StatelessWidget {
 }
 
 class _ServiceClock extends StatefulWidget {
-  const _ServiceClock({required this.startedAt, required this.durationMinutes});
+  const _ServiceClock({
+    required this.startedAt,
+    required this.preparationSkippedAt,
+    required this.durationMinutes,
+  });
 
   final DateTime? startedAt;
+  final DateTime? preparationSkippedAt;
   final int durationMinutes;
 
   @override
@@ -248,15 +261,17 @@ class _ServiceClockState extends State<_ServiceClock> {
         color: AppTheme.warning,
       );
     }
-    final elapsed = DateTime.now().difference(start);
+    final now = DateTime.now();
+    final elapsed = now.difference(start);
+    final skippedAt = widget.preparationSkippedAt;
     final prepRemaining = _preparation - elapsed;
-    if (elapsed < _preparation) {
+    if (skippedAt == null && elapsed < _preparation) {
       return _ClockBanner(
         label: 'Preparation · ${_format(prepRemaining)} remaining',
         color: AppTheme.warning,
       );
     }
-    final serviceElapsed = elapsed - _preparation;
+    final serviceElapsed = now.difference(skippedAt ?? start.add(_preparation));
     final remaining = Duration(minutes: widget.durationMinutes) - serviceElapsed;
     if (remaining > Duration.zero) {
       return _ClockBanner(
@@ -267,6 +282,99 @@ class _ServiceClockState extends State<_ServiceClock> {
     return _ClockBanner(
       label: 'Service time exceeded · ${_format(-remaining)}',
       color: AppTheme.error,
+    );
+  }
+}
+
+class _SkipPreparationButton extends StatefulWidget {
+  const _SkipPreparationButton({required this.booking});
+
+  final Booking booking;
+
+  @override
+  State<_SkipPreparationButton> createState() => _SkipPreparationButtonState();
+}
+
+class _SkipPreparationButtonState extends State<_SkipPreparationButton> {
+  static const _preparation = Duration(minutes: 5);
+  Timer? _ticker;
+  bool _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      if (_canSkip) {
+        setState(() {});
+      } else {
+        _ticker?.cancel();
+        setState(() {});
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    super.dispose();
+  }
+
+  bool get _canSkip {
+    final startedAt = widget.booking.serviceStartedAt;
+    if (widget.booking.preparationSkippedAt != null || startedAt == null) {
+      return false;
+    }
+    final elapsed = DateTime.now().difference(startedAt);
+    return !elapsed.isNegative && elapsed < _preparation;
+  }
+
+  Future<void> _skip() async {
+    if (_busy || !_canSkip) return;
+    final accepted = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Skip preparation?'),
+        content: Text(
+          'Start ${widget.booking.serviceName} now without the remaining preparation time?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Keep preparing'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Skip preparation'),
+          ),
+        ],
+      ),
+    );
+    if (accepted != true || !mounted) return;
+    setState(() => _busy = true);
+    final skipped = await PaymentBookingStore.instance.skipPreparation(
+      widget.booking.id,
+    );
+    if (!mounted) return;
+    setState(() => _busy = false);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          skipped
+              ? 'Preparation skipped; the service timer has started.'
+              : 'Preparation could not be skipped. It may have ended or already been skipped.',
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_canSkip) return const SizedBox.shrink();
+    return OutlinedButton.icon(
+      onPressed: _busy ? null : _skip,
+      icon: const Icon(Icons.fast_forward_rounded),
+      label: Text(_busy ? 'Skipping…' : 'Skip preparation'),
     );
   }
 }

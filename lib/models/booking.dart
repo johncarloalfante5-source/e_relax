@@ -164,6 +164,7 @@ class Booking {
   String? paymentRejectionReason;
   DateTime? checkedInAt;
   DateTime? serviceStartedAt;
+  DateTime? preparationSkippedAt;
   DateTime? serviceCompletedAt;
   String? cancellationReason;
   BalancePayment? balancePayment;

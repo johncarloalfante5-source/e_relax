@@ -65,7 +65,7 @@ class ClientNotificationsScreen extends StatelessWidget {
                     ),
                   ),
                   title: Text(
-                    _noticeTitle(notice.type),
+                    notice.title,
                     style: const TextStyle(fontWeight: FontWeight.w700),
                   ),
                   subtitle: Padding(
@@ -103,7 +103,16 @@ class ClientNotificationsScreen extends StatelessWidget {
               ),
             const SizedBox(height: 8),
             OutlinedButton.icon(
-              onPressed: () => context.go(AppRoutes.clientBookings),
+              onPressed: () async {
+                try {
+                  await PaymentBookingStore.instance.markBookingNoticesRead(
+                    userId: localClientSessionId,
+                  );
+                } catch (_) {
+                  // The bookings page remains reachable; unread state stays persisted.
+                }
+                if (context.mounted) context.go(AppRoutes.clientBookings);
+              },
               icon: const Icon(Icons.calendar_month_outlined),
               label: const Text('View bookings and payment details'),
             ),
@@ -114,21 +123,31 @@ class ClientNotificationsScreen extends StatelessWidget {
   );
 
   static String _noticeTitle(ClientNoticeType type) => switch (type) {
+    ClientNoticeType.newBooking => 'New booking',
+    ClientNoticeType.clientCancelled => 'Booking cancelled',
     ClientNoticeType.paymentVerified => 'Payment verified',
     ClientNoticeType.paymentRejected => 'Payment proof needs attention',
     ClientNoticeType.proofResubmitted => 'Proof submitted',
     ClientNoticeType.bookingConfirmed => 'Booking confirmed',
     ClientNoticeType.bookingCancelled => 'Booking cancelled',
     ClientNoticeType.balanceCollected => 'Balance paid',
+    ClientNoticeType.checkedIn => 'Checked in',
+    ClientNoticeType.serviceStarted => 'Service started',
+    ClientNoticeType.serviceCompleted => 'Service completed',
   };
 
   static IconData _noticeIcon(ClientNoticeType type) => switch (type) {
+    ClientNoticeType.newBooking => Icons.event_note_outlined,
+    ClientNoticeType.clientCancelled => Icons.cancel_outlined,
     ClientNoticeType.paymentVerified => Icons.verified_outlined,
     ClientNoticeType.paymentRejected => Icons.warning_amber_rounded,
     ClientNoticeType.proofResubmitted => Icons.upload_file_rounded,
     ClientNoticeType.bookingConfirmed => Icons.event_available_outlined,
     ClientNoticeType.bookingCancelled => Icons.cancel_outlined,
     ClientNoticeType.balanceCollected => Icons.receipt_long_outlined,
+    ClientNoticeType.checkedIn => Icons.login_rounded,
+    ClientNoticeType.serviceStarted => Icons.spa_outlined,
+    ClientNoticeType.serviceCompleted => Icons.task_alt_rounded,
   };
 
   static Color _noticeColor(ClientNoticeType type) =>

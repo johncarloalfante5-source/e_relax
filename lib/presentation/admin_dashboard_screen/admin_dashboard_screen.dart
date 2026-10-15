@@ -35,7 +35,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
   BookingStatus? _bookingStatusFilter;
   PaymentStatus? _paymentStatusFilter;
   DateTimeRange? _bookingDateRange;
-  _BookingSort _bookingSort = _BookingSort.appointmentTime;
+  _BookingSort _bookingSort = _BookingSort.newest;
   _SalesPeriod _salesPeriod = _SalesPeriod.daily;
   DateTimeRange? _customSalesRange;
   _SalesPeriod _servicePeriod = _SalesPeriod.daily;
@@ -1021,9 +1021,18 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
         ),
         actions: [
           IconButton(
-            onPressed: () {},
+            onPressed: _showAdminNotifications,
             tooltip: 'Notifications',
-            icon: const Icon(Icons.notifications_outlined),
+            icon: AnimatedBuilder(
+              animation: PaymentBookingStore.instance,
+              builder: (context, _) {
+                final userId = AuthSessionStore.instance.profile?.id;
+                final unread = userId == null ? 0 : PaymentBookingStore.instance.unreadNoticeCountForUser(userId);
+                return unread == 0
+                    ? const Icon(Icons.notifications_outlined)
+                    : Badge(label: Text('$unread'), child: const Icon(Icons.notifications_outlined));
+              },
+            ),
           ),
           const Padding(
             padding: EdgeInsets.symmetric(vertical: 10),
@@ -1134,7 +1143,9 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
         ),
       ),
       Expanded(
-        child: ListView(
+        child: AnimatedBuilder(
+          animation: PaymentBookingStore.instance,
+          builder: (context, _) => ListView(
           padding: const EdgeInsets.symmetric(horizontal: 10),
           children: [
             for (final section in _AdminSection.values.where(
@@ -1143,6 +1154,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
               ListTile(
                 leading: Icon(section.icon),
                 title: Text(section.label),
+                trailing: _adminSectionBadge(section),
                 selected: section == _selectedSection,
                 selectedColor: AppTheme.primary,
                 selectedTileColor: AppTheme.primary.withAlpha(18),
@@ -1152,10 +1164,49 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                 onTap: () => _selectAdminSection(section, inDrawer: inDrawer),
               ),
           ],
+          ),
         ),
       ),
     ],
   );
+
+  Widget? _adminSectionBadge(_AdminSection section) {
+    final store = PaymentBookingStore.instance;
+    final userId = AuthSessionStore.instance.profile?.id;
+    final int count;
+    final bool isActionCount;
+    switch (section) {
+      case _AdminSection.bookings:
+        count = userId == null ? 0 : store.unreadBookingNoticeCountForUser(userId);
+        isActionCount = false;
+        break;
+      case _AdminSection.paymentVerification:
+        count = store.pendingBookings.length;
+        isActionCount = true;
+        break;
+      case _AdminSection.onlineInProgress:
+        count = store.bookings
+            .where((booking) => booking.bookingStatus == BookingStatus.inProgress)
+            .length;
+        isActionCount = true;
+        break;
+      case _AdminSection.checkout:
+        count = store.bookings.where((booking) =>
+          booking.paymentStatus == PaymentStatus.verified &&
+          {BookingStatus.checkedIn, BookingStatus.inProgress, BookingStatus.completed}.contains(booking.bookingStatus) &&
+          booking.remainingBalance > 0
+        ).length;
+        isActionCount = true;
+        break;
+      default:
+        return null;
+    }
+    if (count == 0) return null;
+    return Badge(
+      backgroundColor: isActionCount ? Colors.deepOrange : null,
+      label: Text('$count'),
+    );
+  }
 
   void _selectAdminSection(_AdminSection section, {required bool inDrawer}) {
     if (inDrawer) Navigator.of(context).pop();
@@ -1167,7 +1218,78 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       context.push(AppRoutes.adminOnlineInProgress);
       return;
     }
+    if (section == _AdminSection.bookings) {
+      final userId = AuthSessionStore.instance.profile?.id;
+      if (userId != null) {
+        PaymentBookingStore.instance.markBookingNoticesRead(userId: userId).catchError((_) {});
+      }
+    }
     setState(() => _selectedSection = section);
+  }
+
+  Future<void> _showAdminNotifications() async {
+    final userId = AuthSessionStore.instance.profile?.id;
+    if (userId == null) return;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Notifications'),
+        content: SizedBox(
+          width: 480,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.sizeOf(context).height * 0.65,
+            ),
+            child: AnimatedBuilder(
+              animation: PaymentBookingStore.instance,
+              builder: (context, _) {
+                final notices = PaymentBookingStore.instance.noticesForUser(userId)
+                  ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+                if (notices.isEmpty) return const Text('You are all caught up.');
+                return ListView.separated(
+                  shrinkWrap: true,
+                  itemCount: notices.length > 10 ? 10 : notices.length,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (context, index) {
+                    final notice = notices[index];
+                    return ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(
+                        notice.title,
+                        style: TextStyle(
+                          fontWeight: notice.isRead ? FontWeight.normal : FontWeight.w700,
+                        ),
+                      ),
+                      subtitle: Text('${notice.message}\n${notice.createdAt.toLocal()}'),
+                      isThreeLine: true,
+                      trailing: notice.isRead
+                          ? null
+                          : const Icon(Icons.circle, size: 9, color: AppTheme.primary),
+                      onTap: () async {
+                        try {
+                          await PaymentBookingStore.instance.markNoticeRead(
+                            notice.id,
+                            userId: userId,
+                          );
+                        } catch (_) {
+                          // Leave the item unread if Supabase could not persist the receipt.
+                        }
+                        if (!mounted) return;
+                        Navigator.of(dialogContext).pop();
+                        if (notice.bookingId.isNotEmpty) {
+                          _selectAdminSection(_AdminSection.bookings, inDrawer: false);
+                        }
+                      },
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+        ),
+        actions: [TextButton(onPressed: () => Navigator.of(dialogContext).pop(), child: const Text('Close'))],
+      ),
+    );
   }
 
   Widget _selectedSectionContent() => switch (_selectedSection) {
@@ -2439,7 +2561,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                     ],
                     onChanged: (value) => setState(
                       () =>
-                          _bookingSort = value ?? _BookingSort.appointmentTime,
+                      _bookingSort = value ?? _BookingSort.newest,
                     ),
                   ),
                 ),
@@ -2534,6 +2656,8 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                                             child: _BookingServiceTimer(
                                               startedAt:
                                                   booking.serviceStartedAt,
+                                              preparationSkippedAt:
+                                                  booking.preparationSkippedAt,
                                               durationMinutes:
                                                   booking.durationMinutes,
                                             ),
@@ -2685,6 +2809,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
             const SizedBox(height: 8),
             _BookingServiceTimer(
               startedAt: booking.serviceStartedAt,
+              preparationSkippedAt: booking.preparationSkippedAt,
               durationMinutes: booking.durationMinutes,
             ),
           ],
@@ -2864,6 +2989,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                   const SizedBox(height: 8),
                   _BookingServiceTimer(
                     startedAt: booking.serviceStartedAt,
+                    preparationSkippedAt: booking.preparationSkippedAt,
                     durationMinutes: booking.durationMinutes,
                   ),
                 ],
@@ -3828,10 +3954,12 @@ class _ChartLegend extends StatelessWidget {
 class _BookingServiceTimer extends StatefulWidget {
   const _BookingServiceTimer({
     required this.startedAt,
+    required this.preparationSkippedAt,
     required this.durationMinutes,
   });
 
   final DateTime? startedAt;
+  final DateTime? preparationSkippedAt;
   final int durationMinutes;
 
   @override
@@ -3875,8 +4003,11 @@ class _BookingServiceTimerState extends State<_BookingServiceTimer> {
       );
     }
 
-    final elapsed = DateTime.now().difference(start);
-    if (elapsed.isNegative || elapsed < _preparationAllowance) {
+    final now = DateTime.now();
+    final elapsed = now.difference(start);
+    final skippedAt = widget.preparationSkippedAt;
+    if (skippedAt == null &&
+        (elapsed.isNegative || elapsed < _preparationAllowance)) {
       final remaining = elapsed.isNegative
           ? _preparationAllowance
           : _preparationAllowance - elapsed;
@@ -3886,7 +4017,9 @@ class _BookingServiceTimerState extends State<_BookingServiceTimer> {
       );
     }
 
-    final serviceElapsed = elapsed - _preparationAllowance;
+    final serviceElapsed = now.difference(
+      skippedAt ?? start.add(_preparationAllowance),
+    );
     final serviceDuration = Duration(minutes: widget.durationMinutes);
     final serviceRemaining = serviceDuration - serviceElapsed;
     if (serviceRemaining > Duration.zero) {

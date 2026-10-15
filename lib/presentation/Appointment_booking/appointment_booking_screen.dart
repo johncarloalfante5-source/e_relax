@@ -91,8 +91,16 @@ class _AppointmentBookingScreenState extends State<AppointmentBookingScreen>
         return;
       }
       if (!await _selectedTherapistIsAvailable()) {
-        setState(() => _selectedTherapistId = null);
-        _showError('That therapist is no longer available. Choose again.');
+        final isAnyTherapistSelected =
+            _selectedTherapistId == TherapistSelectorWidget.anyTherapistId;
+        if (!isAnyTherapistSelected) {
+          setState(() => _selectedTherapistId = null);
+        }
+        _showError(
+          isAnyTherapistSelected
+              ? 'No therapists are available for that time. Choose another time.'
+              : 'That therapist is no longer available. Choose again.',
+        );
         return;
       }
       if (_selectedSlotHasPassed()) {
@@ -150,13 +158,33 @@ class _AppointmentBookingScreenState extends State<AppointmentBookingScreen>
       _showError('That time has passed. Please choose another time.');
       return;
     }
-    if (!await _selectedTherapistIsAvailable()) {
+    final availableTherapists = await _availableTherapistsForSelectedSlot();
+    final selectedTherapistId = _selectedTherapistId;
+    final isAnyTherapistSelected =
+        selectedTherapistId == TherapistSelectorWidget.anyTherapistId;
+    String? therapistId;
+    if (isAnyTherapistSelected) {
+      if (availableTherapists.isNotEmpty) {
+        therapistId = availableTherapists.first.id;
+      }
+    } else if (availableTherapists.any(
+      (therapist) => therapist.id == selectedTherapistId,
+    )) {
+      therapistId = selectedTherapistId;
+    }
+    if (therapistId == null) {
       setState(() {
-        _selectedTherapistId = null;
+        if (!isAnyTherapistSelected) {
+          _selectedTherapistId = null;
+        }
         _currentStep = 0;
       });
       _pageController.jumpToPage(0);
-      _showError('That therapist is no longer available. Please choose again.');
+      _showError(
+        isAnyTherapistSelected
+            ? 'No therapists are available for that time. Choose another time.'
+            : 'That therapist is no longer available. Please choose again.',
+      );
       return;
     }
     if (_selectedSlotHasPassed()) {
@@ -179,7 +207,7 @@ class _AppointmentBookingScreenState extends State<AppointmentBookingScreen>
       final booking = await PaymentBookingStore.instance.createOnlineBooking(
         CreateBookingRequest(
           serviceId: _serviceData['id']?.toString() ?? '',
-          therapistId: _selectedTherapistId!,
+          therapistId: therapistId,
           appointmentDate: _selectedDate!,
           startTime: _selectedTimeSlot!,
           clientName: profile.displayName,
@@ -201,17 +229,25 @@ class _AppointmentBookingScreenState extends State<AppointmentBookingScreen>
 
   Future<bool> _selectedTherapistIsAvailable() async {
     final therapistId = _selectedTherapistId;
+    if (therapistId == null) return false;
+    final available = await _availableTherapistsForSelectedSlot();
+    if (therapistId == TherapistSelectorWidget.anyTherapistId) {
+      return available.isNotEmpty;
+    }
+    return available.any((therapist) => therapist.id == therapistId);
+  }
+
+  Future<List<TherapistProfile>> _availableTherapistsForSelectedSlot() async {
     final date = _selectedDate;
     final time = _selectedTimeSlot;
-    if (therapistId == null || date == null || time == null) return false;
+    if (date == null || time == null) return const [];
     final duration = (_serviceData['durationMinutes'] as num?)?.toInt() ?? 60;
-    final available = await TherapistRosterStore.instance.availableForBookingRemote(
-          date: date,
-          startTime: time,
-          durationMinutes: duration,
-          serviceId: _serviceData['id']?.toString() ?? '',
-        );
-    return available.any((therapist) => therapist.id == therapistId);
+    return TherapistRosterStore.instance.availableForBookingRemote(
+      date: date,
+      startTime: time,
+      durationMinutes: duration,
+      serviceId: _serviceData['id']?.toString() ?? '',
+    );
   }
 
   bool _selectedSlotHasPassed() {
@@ -233,6 +269,9 @@ class _AppointmentBookingScreenState extends State<AppointmentBookingScreen>
   }
 
   String _therapistName(String? therapistId) {
+    if (therapistId == TherapistSelectorWidget.anyTherapistId) {
+      return 'Any available therapist';
+    }
     if (therapistId == null) return 'Not selected';
     return TherapistRosterStore.instance.findById(therapistId)?.name ??
         'Not selected';

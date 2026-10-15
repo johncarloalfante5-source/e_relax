@@ -69,28 +69,36 @@ String get localClientSessionId => ClientSession.instance.clientId;
 String get localClientSessionName => ClientSession.instance.clientName;
 
 enum ClientNoticeType {
+  newBooking,
+  clientCancelled,
   paymentVerified,
   paymentRejected,
   proofResubmitted,
   bookingConfirmed,
   bookingCancelled,
   balanceCollected,
+  checkedIn,
+  serviceStarted,
+  serviceCompleted,
 }
 
 class ClientPaymentNotice {
   ClientPaymentNotice({
     required this.id,
-    required this.clientId,
+    required this.userId,
     required this.bookingId,
     required this.type,
+    required this.title,
     required this.message,
     required this.createdAt,
   });
 
   final String id;
-  final String clientId;
+  final String userId;
+  String get clientId => userId;
   final String bookingId;
   final ClientNoticeType type;
+  final String title;
   final String message;
   final DateTime createdAt;
   bool isRead = false;
@@ -106,6 +114,9 @@ class PaymentBookingStore extends ChangeNotifier {
   final _repository = SupabaseBookingRepository();
   StreamSubscription<List<Booking>>? _bookingSubscription;
   StreamSubscription<List<Map<String, dynamic>>>? _noticeSubscription;
+  StreamSubscription<List<Map<String, dynamic>>>? _submissionSubscription;
+  StreamSubscription<List<Map<String, dynamic>>>? _transactionSubscription;
+  Timer? _refreshDebounce;
 
   Future<void> initialize() async {
     final profile = AuthSessionStore.instance.profile;
@@ -118,11 +129,22 @@ class PaymentBookingStore extends ChangeNotifier {
       _bookings
         ..clear()
         ..addAll(items);
+      _loadError = null;
       notifyListeners();
     }, onError: (Object error) {
       _loadError = error.toString();
       notifyListeners();
     });
+    await _submissionSubscription?.cancel();
+    _submissionSubscription = _repository.watchPaymentSubmissions().listen(
+      (_) => _scheduleRefresh(),
+      onError: (Object error) { _loadError = error.toString(); notifyListeners(); },
+    );
+    await _transactionSubscription?.cancel();
+    _transactionSubscription = _repository.watchPaymentTransactions().listen(
+      (_) => _scheduleRefresh(),
+      onError: (Object error) { _loadError = error.toString(); notifyListeners(); },
+    );
     await _noticeSubscription?.cancel();
     final userId = SupabaseClientProvider.client.auth.currentUser!.id;
     final initialNotices = await SupabaseClientProvider.client
@@ -134,12 +156,18 @@ class PaymentBookingStore extends ChangeNotifier {
   }
 
   Future<void> clearSession() async {
+    _refreshDebounce?.cancel();
     await _bookingSubscription?.cancel();
     await _noticeSubscription?.cancel();
+    await _submissionSubscription?.cancel();
+    await _transactionSubscription?.cancel();
     _bookingSubscription = null;
     _noticeSubscription = null;
+    _submissionSubscription = null;
+    _transactionSubscription = null;
     _bookings.clear();
     _notices.clear();
+    _loadError = null;
     notifyListeners();
   }
 
@@ -151,15 +179,21 @@ class PaymentBookingStore extends ChangeNotifier {
       ..clear()
       ..addAll(rows.map((row) {
         final key = row['event_key'] as String? ?? '';
-        final type = key.startsWith('payment_verified') ? ClientNoticeType.paymentVerified
+        final type = key.startsWith('new_booking') ? ClientNoticeType.newBooking
+            : key.startsWith('client_cancelled') ? ClientNoticeType.clientCancelled
+            : key.startsWith('booking_checked_in') ? ClientNoticeType.checkedIn
+            : key.startsWith('booking_service_started') ? ClientNoticeType.serviceStarted
+            : key.startsWith('booking_service_completed') ? ClientNoticeType.serviceCompleted
+            : key.startsWith('payment_verified') ? ClientNoticeType.paymentVerified
             : key.startsWith('payment_rejected') ? ClientNoticeType.paymentRejected
             : key.startsWith('proof_resubmitted') ? ClientNoticeType.proofResubmitted
             : key.startsWith('balance_collected') ? ClientNoticeType.balanceCollected
             : key.startsWith('booking_cancelled') ? ClientNoticeType.bookingCancelled
             : ClientNoticeType.bookingConfirmed;
         final notice = ClientPaymentNotice(id: row['id'] as String,
-          clientId: row['user_id'] as String, bookingId: row['booking_id'] as String? ?? '',
-          type: type, message: '${row['title']}: ${row['message']}',
+          userId: row['user_id'] as String, bookingId: row['booking_id'] as String? ?? '',
+          type: type, title: row['title'] as String? ?? 'Booking update',
+          message: row['message'] as String? ?? '',
           createdAt: DateTime.parse(row['created_at'] as String));
         notice.isRead = row['read_at'] != null;
         return notice;
@@ -173,7 +207,18 @@ class PaymentBookingStore extends ChangeNotifier {
     final stream = profile.role.name == 'client' ? _repository.watchForClient() : _repository.watchForStaff();
     final items = await stream.first;
     _bookings..clear()..addAll(items);
+    _loadError = null;
     notifyListeners();
+  }
+
+  void _scheduleRefresh() {
+    _refreshDebounce?.cancel();
+    _refreshDebounce = Timer(const Duration(milliseconds: 250), () {
+      refresh().catchError((Object error) {
+        _loadError = error.toString();
+        notifyListeners();
+      });
+    });
   }
 
   Future<Booking> createOnlineBooking(CreateBookingRequest request) async {
@@ -203,9 +248,23 @@ class PaymentBookingStore extends ChangeNotifier {
       .where((notice) => notice.clientId == clientId && !notice.isRead)
       .length;
 
-  Future<void> markNoticeRead(String noticeId, {required String clientId}) async {
+  List<ClientPaymentNotice> noticesForUser(String userId) => _notices
+      .where((notice) => notice.userId == userId)
+      .toList(growable: false);
+
+  int unreadNoticeCountForUser(String userId) => _notices
+      .where((notice) => notice.userId == userId && !notice.isRead)
+      .length;
+
+  int unreadBookingNoticeCountForUser(String userId) => _notices
+      .where((notice) => notice.userId == userId && notice.bookingId.isNotEmpty && !notice.isRead)
+      .length;
+
+  Future<void> markNoticeRead(String noticeId, {String? clientId, String? userId}) async {
+    final ownerId = userId ?? clientId;
+    if (ownerId == null) return;
     for (final notice in _notices) {
-      if (notice.id == noticeId && notice.clientId == clientId) {
+      if (notice.id == noticeId && notice.userId == ownerId) {
         if (!notice.isRead) {
           await _repository.markNotificationRead(noticeId);
           notice.isRead = true;
@@ -217,7 +276,15 @@ class PaymentBookingStore extends ChangeNotifier {
   }
 
   Future<void> markAllNoticesRead(String clientId) async {
-    for (final notice in _notices.where((item) => item.clientId == clientId && !item.isRead)) {
+    for (final notice in _notices.where((item) => item.userId == clientId && !item.isRead)) {
+      await _repository.markNotificationRead(notice.id);
+      notice.isRead = true;
+    }
+    notifyListeners();
+  }
+
+  Future<void> markBookingNoticesRead({required String userId}) async {
+    for (final notice in _notices.where((item) => item.userId == userId && item.bookingId.isNotEmpty && !item.isRead)) {
       await _repository.markNotificationRead(notice.id);
       notice.isRead = true;
     }
@@ -388,6 +455,25 @@ class PaymentBookingStore extends ChangeNotifier {
     } catch (error) { _loadError = error.toString(); notifyListeners(); return false; }
   }
 
+  Future<bool> skipPreparation(String bookingId) async {
+    final booking = findById(bookingId);
+    if (booking == null ||
+        booking.bookingStatus != BookingStatus.inProgress ||
+        booking.serviceStartedAt == null ||
+        booking.preparationSkippedAt != null) {
+      return false;
+    }
+    try {
+      await _repository.skipPreparation(bookingId);
+      await refresh();
+      return true;
+    } catch (error) {
+      _loadError = error.toString();
+      notifyListeners();
+      return false;
+    }
+  }
+
   Future<bool> cancelClientBooking(String bookingId) async {
     final booking = findById(bookingId);
     if (booking == null ||
@@ -448,9 +534,10 @@ class PaymentBookingStore extends ChangeNotifier {
       0,
       ClientPaymentNotice(
         id: id,
-        clientId: booking.clientId,
+        userId: booking.clientId,
         bookingId: booking.id,
         type: type,
+        title: type.name,
         message: message,
         createdAt: DateTime.now(),
       ),

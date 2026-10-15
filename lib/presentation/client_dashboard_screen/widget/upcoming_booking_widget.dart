@@ -66,7 +66,7 @@ class _UpcomingBookingWidgetState extends State<UpcomingBookingWidget> {
                 borderRadius: BorderRadius.circular(12),
               ),
               child: Text(
-                notice.message,
+                '${notice.title}: ${notice.message}',
                 style: TextStyle(
                   color: notice.type == ClientNoticeType.paymentRejected ||
                           notice.type == ClientNoticeType.bookingCancelled

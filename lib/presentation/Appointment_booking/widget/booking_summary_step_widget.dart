@@ -5,6 +5,7 @@ import '../../../data/therapist_roster_store.dart';
 import '../../../models/booking.dart';
 import '../../../theme/app_theme.dart';
 import '../../../widget/custom_icon_widget.dart';
+import 'therapist_selector_widget.dart';
 
 class BookingSummaryStepWidget extends StatelessWidget {
   final Map<String, dynamic> serviceData;
@@ -39,10 +40,14 @@ class BookingSummaryStepWidget extends StatelessWidget {
     return '${months[selectedDate!.month - 1]} ${selectedDate!.day}, ${selectedDate!.year}';
   }
 
-  String get _therapistName => selectedTherapistId == null
-      ? 'Not selected'
-      : TherapistRosterStore.instance.findById(selectedTherapistId!)?.name ??
-            'Not selected';
+  String get _therapistName {
+    if (selectedTherapistId == TherapistSelectorWidget.anyTherapistId) {
+      return 'Any available therapist';
+    }
+    if (selectedTherapistId == null) return 'Not selected';
+    return TherapistRosterStore.instance.findById(selectedTherapistId!)?.name ??
+        'Not selected';
+  }
 
   double get _serviceTotal => (serviceData['price'] as num).toDouble();
   double get _downPaymentAmount => Booking.calculateDownPayment(_serviceTotal);

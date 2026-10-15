@@ -23,6 +23,14 @@ class SupabaseBookingRepository implements BookingRepository {
   Stream<List<Booking>> watchForStaff() => _client.from('bookings')
       .stream(primaryKey: ['id']).asyncMap((rows) => _hydrateRows(rows));
 
+  @override
+  Stream<List<Map<String, dynamic>>> watchPaymentSubmissions() =>
+      _client.from('payment_submissions').stream(primaryKey: ['id']);
+
+  @override
+  Stream<List<Map<String, dynamic>>> watchPaymentTransactions() =>
+      _client.from('payment_transactions').stream(primaryKey: ['id']);
+
   Future<List<Booking>> _hydrateRows(List<Map<String, dynamic>> rows) async {
     final result = <Booking>[];
     for (final row in rows) {
@@ -82,6 +90,7 @@ class SupabaseBookingRepository implements BookingRepository {
     booking.updatedAt = DateTime.parse(row['updated_at'] as String);
     booking.checkedInAt = row['checked_in_at'] == null ? null : DateTime.parse(row['checked_in_at'] as String);
     booking.serviceStartedAt = row['service_started_at'] == null ? null : DateTime.parse(row['service_started_at'] as String);
+    booking.preparationSkippedAt = row['preparation_skipped_at'] == null ? null : DateTime.parse(row['preparation_skipped_at'] as String);
     booking.serviceCompletedAt = row['service_completed_at'] == null ? null : DateTime.parse(row['service_completed_at'] as String);
     booking.cancellationReason = row['cancellation_reason'] as String?;
     booking.proofSubmissions
@@ -172,6 +181,12 @@ class SupabaseBookingRepository implements BookingRepository {
 
   @override
   Future<void> transition(String bookingId, BookingStatus next, {String? reason}) => _client.rpc('transition_booking', params: {'p_booking_id': bookingId, 'p_status': next.name, 'p_reason': reason});
+
+  @override
+  Future<void> skipPreparation(String bookingId) => _client.rpc(
+    'skip_booking_preparation',
+    params: {'p_booking_id': bookingId},
+  );
 
   @override
   Future<void> cancelClientBooking(String bookingId) => _client.rpc(
